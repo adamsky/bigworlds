@@ -1,5 +1,7 @@
 ## <img src="assets/bigworlds-logo.png" width="300">
 
+[![Static Badge](https://img.shields.io/badge/discord-server-blue)](https://discord.gg/SHQ3rYvn3B)
+
 <!-- cargo-rdme start -->
 
 
