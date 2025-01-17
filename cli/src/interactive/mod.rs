@@ -145,7 +145,7 @@ pub async fn start(
                 interface.set_prompt(local::create_prompt(&sim, &config).await.as_str())?;
             }
             SimDriver::Remote(client) => {
-                client.send_msg(Message::StatusRequest(StatusRequest {
+                client.send_msg(&Message::StatusRequest(StatusRequest {
                     format: "".to_string(),
                 }))?;
                 if let Ok(msg) = client.try_recv_msg() {
@@ -684,12 +684,12 @@ show_list               {show_list}
                                 }
                             }
                             "spawn" => {
-                                let num = args.parse::<usize>().unwrap_or(100);
+                                let args = args.split(' ').collect::<Vec<&str>>();
+                                let prefab = args[0].to_string();
+                                let name = args[1].to_string();
                                 match &driver {
                                     SimDriver::Local(sim) => {
-                                        for _ in 0..num {
-                                            sim.spawn_entity().await?;
-                                        }
+                                        sim.spawn_entity(name, prefab).await?;
                                     }
                                     _ => (),
                                 }
@@ -785,11 +785,15 @@ show_list               {show_list}
     println!("Leaving interactive mode.");
     // send the shutdown signal
     shutdown.shutdown()?;
-    if let SimDriver::Remote(ref mut client) = driver {
-        // unimplemented!()
-        println!("Disconnecting...");
-        client.disconnect();
-        // thread::sleep(Duration::from_millis(500));
+    match driver {
+        SimDriver::Local(sim_handle) => {
+            sim_handle.shutdown().await?;
+        }
+
+        SimDriver::Remote(ref mut client) => {
+            println!("Disconnecting...");
+            client.disconnect();
+        }
     }
     Ok(())
 }

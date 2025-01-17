@@ -1,4 +1,4 @@
-//! `machine` denotes a [`processor`] task set up to act as a virtual machine
+//! `machine` denotes a [`behavior`] task set up to act as a virtual machine
 //! executing a proprietary instruction set.
 //!
 //! The name can also be taken as hinting at the *(finite) state machine*
@@ -11,12 +11,12 @@
 //! # Instancing
 //!
 //! `machine` is provided alongside an instancing mechanism, the same that's
-//! used for [`processor`]. It allows for automatically spawning `machine`s
+//! used for [`behavior`]. It allows for automatically spawning `machine`s
 //! based on preselected requirements. For example we could spawn the same
 //! piece of logic for each entity that has some specific component attached.
 //!
 //!
-//! [`processor`]: crate::processor
+//! [`behavior`]: crate::behavior
 
 pub mod cmd;
 pub mod error;
@@ -34,9 +34,9 @@ use tokio::runtime;
 use tokio_stream::StreamExt;
 
 use crate::address::LocalAddress;
+use crate::behavior::BehaviorHandle;
 use crate::entity::StorageIndex;
 use crate::executor::LocalExec;
-use crate::processor::ProcessorHandle;
 use crate::query::{Query, QueryProduct};
 use crate::string;
 use crate::{
@@ -76,124 +76,117 @@ impl Machine {
 
 #[derive(Clone)]
 pub struct MachineHandle {
-    executor: LocalExec<rpc::machine::Request, Result<rpc::machine::Response>>,
-    processor: ProcessorHandle,
+    executor: LocalExec<rpc::machine::Request, crate::Result<rpc::machine::Response>>,
+    behavior: BehaviorHandle,
 }
 
 #[async_trait::async_trait]
-impl Executor<rpc::machine::Request, Result<rpc::machine::Response>> for MachineHandle {
+impl Executor<rpc::machine::Request, crate::Result<rpc::machine::Response>> for MachineHandle {
     async fn execute(
         &self,
         req: rpc::machine::Request,
-    ) -> crate::error::Result<Result<rpc::machine::Response>> {
+    ) -> crate::Result<crate::Result<rpc::machine::Response>> {
         self.executor.execute(req).await
     }
 }
 
 impl MachineHandle {
-    pub async fn execute_cmd(&self, cmd: cmd::Command) -> Result<rpc::machine::Response> {
+    pub async fn execute_cmd(&self, cmd: cmd::Command) -> crate::Result<rpc::machine::Response> {
         self.execute(rpc::machine::Request::Execute(cmd)).await?
     }
 
     pub async fn execute_cmd_batch(
         &self,
         cmds: Vec<cmd::Command>,
-    ) -> Result<rpc::machine::Response> {
+    ) -> crate::Result<rpc::machine::Response> {
         self.execute(rpc::machine::Request::ExecuteBatch(cmds))
             .await?
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.processor
-            .execute(rpc::processor::Request::Shutdown)
+        self.behavior
+            .execute(rpc::behavior::Request::Shutdown)
             .await
             .map_err(|e| Error::new(LocationInfo::empty(), ErrorKind::CoreError(e.to_string())))
             .map(|_| ())
     }
 }
 
-/// Spawns a new machine processor task.
+/// Spawns a new machine behavior task.
 ///
 /// Returns a handle that can be used to communicate with the machine from the
 /// outside.
 ///
 /// The handle supports operations specific to machine operations as opposed to
-/// regular processors. Internally the machine task uses the generic processor
+/// regular behaviors. Internally the machine task uses the generic behavior
 /// executor with it's standard request/response types.
 pub fn spawn(
     worker: LocalExec<rpc::worker::Request, crate::Result<rpc::worker::Response>>,
     runtime: runtime::Handle,
 ) -> Result<MachineHandle> {
-    let (mut sender, receiver) = tokio::sync::mpsc::channel::<(
-        rpc::machine::Request,
-        tokio::sync::oneshot::Sender<Result<rpc::machine::Response>>,
-    )>(20);
-    let mut stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
-    let mut executor = LocalExec::new(sender);
+    let (executor, mut stream) = LocalExec::new(20);
 
-    let f = |mut processor_stream: tokio_stream::wrappers::ReceiverStream<(
-        rpc::processor::Request,
-        tokio::sync::oneshot::Sender<crate::Result<rpc::processor::Response>>,
+    let f = |mut behavior_stream: tokio_stream::wrappers::ReceiverStream<(
+        rpc::behavior::Request,
+        tokio::sync::oneshot::Sender<crate::Result<rpc::behavior::Response>>,
     )>,
-             worker| async move {
-        let mut machine = Machine {
-            state: string::new_truncate("start"),
-            worker,
-        };
+             worker| {
+        Box::pin(async move {
+            let mut machine = Machine {
+                state: string::new_truncate("start"),
+                worker,
+            };
 
-        loop {
-            tokio::select! {
-                Some((request, send)) = stream.next() => {
-                    match request {
-                        rpc::machine::Request::Execute(cmd) => {
-                            // unimplemented!();
-                            trace!("executing cmd: {cmd:?}");
-                            let result = cmd
-                                .execute(
-                                    &mut machine,
-                                    &mut "".to_string(),
-                                    &mut ArrayVec::new(),
-                                    &mut Registry {
-                                        str0: LongString::new(),
-                                        int0: 0,
-                                        float0: 0.,
-                                        bool0: false,
-                                    },
-                                    &"".to_string(),
-                                    &0,
-                                    &LocationInfo::empty(),
-                                )
-                                .await;
-                            send.send(Ok(rpc::machine::Response::Empty));
-                            // cmd.execute();
+            loop {
+                tokio::select! {
+                    Some((request, send)) = stream.next() => {
+                        match request {
+                            rpc::machine::Request::Execute(cmd) => {
+                                trace!("executing cmd: {cmd:?}");
+                                let result = cmd
+                                    .execute(
+                                        &mut machine,
+                                        &mut string::new_truncate(""),
+                                        &mut ArrayVec::new(),
+                                        &mut Registry {
+                                            str0: LongString::new(),
+                                            int0: 0,
+                                            float0: 0.,
+                                            bool0: false,
+                                        },
+                                        &string::new_truncate(""),
+                                        &0,
+                                        &LocationInfo::empty(),
+                                    )
+                                    .await;
+                                send.send(Ok(rpc::machine::Response::Empty));
+                                // cmd.execute();
+                            }
+                            _ => unimplemented!(),
                         }
-                        _ => unimplemented!(),
                     }
-                }
-                Some((request, send)) = processor_stream.next() => {
-                    match request {
-                        rpc::processor::Request::Shutdown =>  {
-                            send.send(Ok(rpc::processor::Response::Empty));
-                            return Ok(());
+                    Some((request, send)) = behavior_stream.next() => {
+                        match request {
+                            rpc::behavior::Request::Shutdown =>  {
+                                send.send(Ok(rpc::behavior::Response::Empty));
+                                return Ok(());
+                            }
+                            _ => unimplemented!(),
                         }
-                        _ => unimplemented!(),
                     }
-                }
-                else => {
-                    continue;
-                }
+                    else => {
+                        continue;
+                    }
 
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        }) as _
     };
 
-    let processor = crate::processor::spawn(f, worker, runtime)?;
+    let behavior = crate::behavior::spawn_synced(f, worker, runtime)?;
 
-    Ok(MachineHandle {
-        executor,
-        processor,
-    })
+    Ok(MachineHandle { executor, behavior })
 }
 
 /// Holds instruction location information.

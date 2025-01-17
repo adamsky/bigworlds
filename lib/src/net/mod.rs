@@ -271,21 +271,30 @@ impl Display for Encoding {
     }
 }
 
+#[derive(Clone, strum::Display)]
+pub enum ConnectionOrAddress {
+    Connection(quinn::Connection),
+    Address(SocketAddr),
+}
+
+// TODO: For extra compatibility, as well as access to more exotic transports
+// such UNIX domain sockets, we can add additional listening solutions with
+// their own setups. E.g. zmq, nng, laminar
 pub fn spawn_listeners(
     listener_addrs: Vec<CompositeAddress>,
-    net_exec: LocalExec<(SocketAddr, Vec<u8>), Vec<u8>>,
+    net_exec: LocalExec<(ConnectionOrAddress, Vec<u8>), Vec<u8>>,
     runtime: runtime::Handle,
     shutdown: Shutdown,
 ) -> Result<()> {
     for listener_addr in listener_addrs {
         match listener_addr.transport {
-            Some(Transport::FramedTcp) | None => framed_tcp::spawn_listener(
+            None | Some(Transport::Quic) => quic::spawn(
                 listener_addr.address.clone().try_into()?,
                 net_exec.clone(),
                 runtime.clone(),
                 shutdown.clone(),
-            ),
-            Some(Transport::Quic) => quic::spawn(
+            )?,
+            Some(Transport::FramedTcp) => framed_tcp::spawn_listener(
                 listener_addr.address.clone().try_into()?,
                 net_exec.clone(),
                 runtime.clone(),
@@ -317,10 +326,7 @@ pub async fn spawn_connection(
     runtime: runtime::Handle,
     shutdown: Shutdown,
 ) -> Result<LocalExec<Vec<u8>, Result<Vec<u8>>>> {
-    // create a new channel
-    let (send, recv) = tokio::sync::mpsc::channel(10);
-    let executor = LocalExec::new(send);
-    let stream = tokio_stream::wrappers::ReceiverStream::from(recv);
+    let (executor, stream) = LocalExec::new(10);
 
     match endpoint.transport {
         // Some(Transport::FramedTcp) | None => {

@@ -5,37 +5,29 @@ use std::ops::{Deref, DerefMut};
 
 use fnv::FnvHashMap;
 
+use crate::address::LocalAddress;
 // use crate::query::{AddressedTypedMap, Description, Filter, Layout, Map,
 // Query, QueryProduct};
 use crate::entity::Entity;
 use crate::time::Instant;
 use crate::{
-    Address, CompName, EntityId, EntityName, EventName, Float, Int, Result, StringId, Var, VarName,
-    VarType,
+    string, Address, CompName, EntityId, EntityName, EventName, Float, Int, Result, StringId, Var,
+    VarName, VarType,
 };
 
 /// Alternative query structure compatible with environments that don't
 /// support native query's variant enum layout.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Query {
     pub trigger: Trigger,
     pub description: Description,
     pub layout: Layout,
     pub filters: Vec<Filter>,
     pub mappings: Vec<Map>,
+    pub scope: Scope,
 }
 
 impl Query {
-    pub fn new() -> Query {
-        Query {
-            trigger: Trigger::Immediate,
-            description: Description::None,
-            layout: Layout::Var,
-            filters: vec![],
-            mappings: vec![],
-        }
-    }
-
     pub fn description(mut self, description: Description) -> Self {
         self.description = description;
         self
@@ -64,6 +56,56 @@ pub enum QueryProduct {
     Empty,
 }
 
+impl QueryProduct {
+    pub fn merge(&mut self, other: QueryProduct) -> Result<()> {
+        match self {
+            QueryProduct::NativeAddressedVar(hash_map) => todo!(),
+            QueryProduct::AddressedVar(hash_map) => todo!(),
+            QueryProduct::AddressedTyped(addressed_typed_map) => todo!(),
+            QueryProduct::OrderedVar(_, vec) => todo!(),
+            QueryProduct::Var(ref mut vec) => match other {
+                QueryProduct::NativeAddressedVar(hash_map) => todo!(),
+                QueryProduct::AddressedVar(hash_map) => todo!(),
+                QueryProduct::AddressedTyped(addressed_typed_map) => todo!(),
+                QueryProduct::OrderedVar(_, vec) => todo!(),
+                QueryProduct::Var(_vec) => {
+                    vec.extend(_vec);
+                }
+                QueryProduct::Empty => todo!(),
+            },
+            QueryProduct::Empty => *self = other,
+        };
+
+        Ok(())
+    }
+
+    pub fn to_vec(self) -> Vec<Var> {
+        match self {
+            QueryProduct::Var(vec) => vec,
+            _ => unimplemented!(),
+        }
+    }
+
+    pub fn to_map(self) -> FnvHashMap<Address, Var> {
+        match self {
+            QueryProduct::AddressedVar(map) => map,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+impl TryFrom<crate::rpc::worker::Response> for QueryProduct {
+    type Error = crate::Error;
+
+    fn try_from(response: crate::rpc::worker::Response) -> std::result::Result<Self, Self::Error> {
+        use crate::rpc::worker::Response;
+        match response {
+            Response::Query(product) => Ok(product),
+            _ => Err(crate::Error::UnexpectedResponse(format!("{}", response))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct GlobAddress {
     pub entity: String,
@@ -80,14 +122,15 @@ pub struct AddressedTypedMap {
     pub bools: FnvHashMap<Address, bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub enum Trigger {
     /// Immediate, one-time data transfer
+    #[default]
     Immediate,
     /// Trigger each time specific event(s) is fired
-    Event(EventName),
-    /// Trigger each time certain data is mutated
-    Mutation(Address),
+    SubscribeEvent(EventName),
+    /// Trigger each time certain data point is mutated
+    SubscribeMutation(Address),
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -103,7 +146,7 @@ pub enum Filter {
     /// Filter by entity id
     Id(Vec<EntityId>),
     /// Filter by some variable being in specified range
-    VarRange(Address, Var, Var),
+    VarRange(LocalAddress, Var, Var),
     /// Filter by some variable being in specified range
     AttrRange(StringId, Var, Var),
     /// Filter by entity distance to some point, matching on the position
@@ -137,15 +180,15 @@ pub enum Map {
 
 impl Map {
     pub fn components(components: Vec<&str>) -> Self {
-        let mut c = Vec::<String>::new();
+        let mut c = Vec::<StringId>::new();
         for comp in components.into_iter() {
-            c.push(comp.into());
+            c.push(string::new_truncate(comp));
         }
         Map::Components(c)
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub enum Description {
     NativeDescribed,
     /// Self-described values, each with attached address
@@ -154,21 +197,54 @@ pub enum Description {
     // CustomAddressed,
     /// Values ordered based on an order table
     Ordered,
+    #[default]
     None,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub enum Layout {
     /// Use the internal value representation type built on Rust's enum
+    #[default]
     Var,
     /// Use a separate map/list for each variable type
     Typed,
     // TypedSubset(Vec<VarType>),
 }
 
-// TODO expand beyond only products of the same type
+/// Defines how widely should the search be spread across the cluster.
+/// Effectively it's a way to potentially limit the number of workers a query
+/// should be performed on.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub enum Scope {
+    /// Broadcast the query across the whole cluster
+    #[default]
+    Global,
+    /// Restrict the query to the worker that originally received the query
+    Local,
+    /// Number of times the query can be "broadcasted" to all visible workers
+    Broadcasts(u8),
+    /// Number of times the query will be passed on to another worker.
+    ///
+    /// # Note
+    ///
+    /// If the number is smaller than the number of currently visible workers,
+    /// a random selection of workers is used.
+    Edges(u8),
+    /// Number of workers to receive the query
+    Workers(u8),
+    /// Maximum roundtrip time allowed when considering broadcasting query to
+    /// remote workers.
+    ///
+    /// # Note
+    ///
+    /// This is a best-effort scope requirement performed based on available
+    /// connection metrics data, which can be limited.
+    Time(std::time::Duration),
+}
+
+// TODO expand beyond only similarly described products
 /// Combines multiple products.
-pub fn combine_queries(mut products: Vec<QueryProduct>) -> QueryProduct {
+pub fn combine_products(mut products: Vec<QueryProduct>) -> QueryProduct {
     let mut final_product = match products.pop() {
         Some(p) => p,
         None => return QueryProduct::Empty,
@@ -196,12 +272,10 @@ pub fn combine_queries(mut products: Vec<QueryProduct>) -> QueryProduct {
 pub async fn process_query(
     query: &Query,
     part: &mut crate::worker::part::Part,
-    // entities: &FnvHashMap<u32, Entity>,
-    // entity_names: &FnvHashMap<EntityName, EntityId>,
-    // entity_to_node: &FnvHashMap<>
 ) -> Result<QueryProduct> {
-    println!(">> all entities: {:?}", part.entities);
-    let mut selected_entities = part.entities.keys().map(|v| v).collect::<Vec<&String>>();
+    // HACK
+    debug!(">> all entities: {:?}", part.entities);
+    let mut selected_entities = part.entities.keys().map(|v| v).collect::<Vec<&StringId>>();
     let entities = &part.entities;
     // println!(
     //     "copying all entity keys took: {} ms",
@@ -210,7 +284,6 @@ pub async fn process_query(
 
     // first apply filters and get a list of selected entities
     for filter in &query.filters {
-        // let mut to_remove = Vec::new();
         let mut to_retain = Vec::new();
         let insta = Instant::now();
         match filter {
@@ -394,7 +467,33 @@ pub async fn process_query(
                 }
             }
             Filter::SomeComponents(_) => todo!(),
-            Filter::VarRange(_, _, _) => todo!(),
+            Filter::VarRange(addr, low, high) => {
+                for entity_name in selected_entities {
+                    let entity = if let Some(entity) = part.entities.get(entity_name) {
+                        entity
+                    } else {
+                        continue;
+                    };
+                    let var = if let Ok(var) = entity.storage.get_var(&addr.storage_index()) {
+                        var
+                    } else {
+                        continue;
+                    };
+
+                    match addr.var_type {
+                        VarType::String => todo!(),
+                        VarType::Int => {
+                            let int = var.as_int()?;
+                            if int > &low.to_int() && int < &high.to_int() {
+                                to_retain.push(entity_name);
+                            }
+                        }
+                        VarType::Float => todo!(),
+                        VarType::Bool => todo!(),
+                        _ => unimplemented!(),
+                    }
+                }
+            }
             Filter::AttrRange(_, _, _) => todo!(),
         }
 

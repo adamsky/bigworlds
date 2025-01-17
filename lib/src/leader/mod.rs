@@ -26,10 +26,11 @@ use uuid::Uuid;
 use crate::error::{Error as CoreError, Error, Result as CoreResult, Result};
 use crate::executor::{Executor, LocalExec, RemoteExec};
 use crate::leader::manager::ManagerExec;
-use crate::net::{CompositeAddress, Encoding, Transport};
+use crate::net::{CompositeAddress, ConnectionOrAddress, Encoding, Transport};
+use crate::rpc::leader::{Request, Response};
 use crate::util::Shutdown;
 use crate::util_net::{decode, encode};
-use crate::worker::WorkerId;
+use crate::worker::{WorkerExec, WorkerId};
 use crate::{net, rpc, string, EntityId, Model, QueryProduct, WorkerHandle};
 
 const LEADER_ADDRESS: &str = "0.0.0.0:5912";
@@ -39,30 +40,36 @@ pub type LeaderId = Uuid;
 /// Single worker as seen by the leader.
 #[derive(Clone)]
 pub struct Worker {
+    pub id: WorkerId,
+
     pub entities: Vec<EntityId>,
     // pub executor: Option<LocalExec<RequestLocal, Result<Response>>>,
-    /// Relays information about worker synchronization situation. Workers
-    /// that are also servers can block processing of further steps if any of
-    /// their connected clients blocks.
+    /// Relays information about worker synchronization situation. Workers with
+    /// attached servers can block processing of further steps if any of their
+    /// connected clients blocks.
     pub is_blocking_step: bool,
     pub furthest_agreed_step: usize,
 
     exec: WorkerExec,
 }
 
-#[derive(Clone)]
-pub enum WorkerExec {
-    /// Remote executor for sending requests to worker over the wire
-    Remote(RemoteExec<rpc::worker::Request, rpc::worker::Response>),
-    /// Local executor for sending requests to worker within the same runtime
-    Local(LocalExec<rpc::worker::RequestLocal, Result<rpc::worker::Response>>),
+impl Worker {
+    pub fn new(id: WorkerId, exec: WorkerExec) -> Self {
+        Self {
+            id,
+            entities: vec![],
+            is_blocking_step: false,
+            furthest_agreed_step: 0,
+            exec,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl Executor<rpc::worker::Request, rpc::worker::Response> for Worker {
     async fn execute(&self, req: rpc::worker::Request) -> CoreResult<rpc::worker::Response> {
         match &self.exec {
-            WorkerExec::Remote(remote_exec) => remote_exec.execute(req).await,
+            WorkerExec::Remote(remote_exec) => remote_exec.execute(req).await?,
             WorkerExec::Local(local_exec) => local_exec
                 .execute(rpc::worker::RequestLocal::Request(req))
                 .await
@@ -76,7 +83,7 @@ impl Executor<rpc::worker::Request, rpc::worker::Response> for Worker {
 /// a network of workers.
 ///
 /// It doesn't hold any entity state, leaving that entirely to workers.
-pub struct Leader {
+pub struct State {
     /// Starting configuration.
     pub config: LeaderConfig,
 
@@ -145,18 +152,23 @@ pub struct LeaderHandle {
 
     /// Worker executor for running requests coming from a local worker
     pub worker_exec:
-        LocalExec<(Option<WorkerId>, rpc::leader::RequestLocal), Result<rpc::leader::Response>>,
-    pub worker_id: Option<WorkerId>,
+        LocalExec<(WorkerId, rpc::leader::RequestLocal), Result<rpc::leader::Response>>,
+    // pub worker_id: Option<WorkerId>,
 }
 
 #[async_trait::async_trait]
 impl Executor<rpc::leader::Request, Result<rpc::leader::Response>> for LeaderHandle {
     async fn execute(&self, req: rpc::leader::Request) -> Result<Result<rpc::leader::Response>> {
-        debug!("leaderhandle execute worker_id: {:?}", self.worker_id);
-        self.worker_exec
-            .execute((self.worker_id, rpc::leader::RequestLocal::Request(req)))
+        self.ctl
+            .execute(rpc::leader::RequestLocal::Request(req))
             .await
             .map_err(|e| e.into())
+
+        // debug!("leaderhandle execute worker_id: {:?}", self.worker_id);
+        // self.worker_exec
+        //     .execute((self.worker_id, rpc::leader::RequestLocal::Request(req)))
+        //     .await
+        //     .map_err(|e| e.into())
     }
 }
 
@@ -164,7 +176,11 @@ impl LeaderHandle {
     /// Connects leader to worker. It also makes sure to connect worker
     /// to leader. Local channel communications are more difficult and
     /// we need to set things up both ways.
-    pub async fn connect_to_worker(&mut self, worker_handle: &WorkerHandle) -> Result<()> {
+    pub async fn connect_to_worker(
+        &mut self,
+        worker_handle: &WorkerHandle,
+        duplex: bool,
+    ) -> Result<()> {
         // connect leader to worker
         if let rpc::leader::Response::Empty = self
             .ctl
@@ -177,20 +193,9 @@ impl LeaderHandle {
             println!(">>>> leader responded EMPTY/OK to connecttoworker");
         }
 
-        // connect worker to leader
-        // if let protocols::worker::Response::ConnectToLeader { worker_id } = worker_handle
-        let resp = worker_handle
-            .ctl_exec
-            .execute(rpc::worker::RequestLocal::ConnectToLeader(
-                self.worker_exec.clone(),
-                worker_handle.leader_exec.clone(),
-            ))
-            .await??;
-        if let rpc::worker::Response::ConnectToLeader { worker_id } = resp {
-            println!(">>>> worker responded: I connected to leader: worker_id {worker_id}");
-            self.worker_id = Some(worker_id);
-        } else {
-            panic!("bad response: {}", resp);
+        if duplex {
+            // connect worker to leader
+            worker_handle.connect_to_leader(self).await?;
         }
 
         Ok(())
@@ -216,30 +221,14 @@ pub fn spawn(
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
 ) -> Result<LeaderHandle> {
-    // controller requests channel
-    let (mut local_ctl_sender, local_ctl_receiver) = tokio::sync::mpsc::channel::<(
-        rpc::leader::RequestLocal,
-        tokio::sync::oneshot::Sender<Result<rpc::leader::Response>>,
-    )>(20);
-    let mut local_ctl_stream = tokio_stream::wrappers::ReceiverStream::new(local_ctl_receiver);
-    let mut local_ctl_executor = LocalExec::new(local_ctl_sender);
+    // controller requests
+    let (local_ctl_executor, mut local_ctl_stream) = LocalExec::new(20);
 
-    // network requests channel
-    let (mut net_sender, net_receiver) = tokio::sync::mpsc::channel::<(
-        (SocketAddr, Vec<u8>),
-        tokio::sync::oneshot::Sender<Vec<u8>>,
-    )>(20);
-    let mut net_stream = tokio_stream::wrappers::ReceiverStream::new(net_receiver);
-    let net_exec = LocalExec::new(net_sender);
+    // network requests
+    let (net_exec, mut net_stream) = LocalExec::new(20);
 
-    // local worker requests channel
-    let (mut local_worker_sender, local_worker_receiver) = tokio::sync::mpsc::channel::<(
-        (Option<WorkerId>, rpc::leader::RequestLocal),
-        tokio::sync::oneshot::Sender<Result<rpc::leader::Response>>,
-    )>(20);
-    let mut local_worker_stream =
-        tokio_stream::wrappers::ReceiverStream::new(local_worker_receiver);
-    let local_worker_executor = LocalExec::new(local_worker_sender);
+    // local worker requests
+    let (local_worker_executor, mut local_worker_stream) = LocalExec::new(20);
 
     net::spawn_listeners(
         listeners,
@@ -248,14 +237,14 @@ pub fn spawn(
         shutdown.clone(),
     )?;
 
-    let mut leader = Leader {
+    let mut state = State {
         config,
         clock: 0,
         model: None,
         workers: Default::default(),
         workers_by_addr: Default::default(),
     };
-    let leader = manager::spawn(leader)?;
+    let manager = manager::spawn(state)?;
 
     let _ctl_exec = local_ctl_executor.clone();
     runtime.clone().spawn(async move {
@@ -287,100 +276,38 @@ pub fn spawn(
 
         loop {
             let runtime = runtime.clone();
-            let leader = leader.clone();
+            let manager = manager.clone();
 
             tokio::select! {
                 Some((req, s)) = local_ctl_stream.next() => {
-                    debug!("leader: processing controller request");
+                    debug!("leader: processing local controller request");
                     runtime.clone().spawn(async move {
-                        let resp = handle_local_controller_request(req, leader, runtime.clone()).await;
+                        let resp = handle_local_controller_request(req, manager, runtime.clone()).await;
                         s.send(resp);
                     });
                 },
-                Some(((addr, bytes), s)) = net_stream.next() => {
+                Some(((worker_id, req), s)) = local_worker_stream.next() => {
+                    trace!("leader: processing message from local worker");
+                    runtime.clone().spawn(async move {
+                        let resp = handle_local_worker_request(req, worker_id, manager, runtime.clone()).await;
+                        s.send(resp);
+                    });
+
+                }
+                Some(((maybe_con, bytes), s)) = net_stream.next() => {
                     debug!("leader: processing message from network");
 
                     runtime.clone().spawn(async move {
-                        // trace!("message bytes: {:?}", bytes);
-
-                        unimplemented!();
-                        // let worker_id = leader.lock().await.workers_by_addr.get(&addr).cloned();
-                        // #[cfg(feature = "archive")]
-                        // {
-                        //     trace!("using archive encoding");
-                        //     let req: msg::worker_leader::Request = unsafe { rkyv::from_bytes_unchecked(&bytes).unwrap() };
-                        //     trace!("req: {:?}", req);
-                        //     let resp = handle_worker_request(req, worker_id, leader, runtime.clone()).await.unwrap();
-                        //     let resp = rkyv::to_bytes::<_, 1024>(resp).unwrap();
-                        //     s.send(resp.to_vec());
-                        // }
-                        // #[cfg(not(feature = "archive"))]
-                        // {
-                        //     // use bincode instead
-                        //     trace!("using bincode encoding");
-                        //
-                        //     let req: msg::worker_leader::Request = bincode::deserialize(&bytes).unwrap();
-                        //     trace!("req: {:?}", req);
-                        //     // tokio::time::sleep(Duration::from_secs(1)).await;
-                        //     let resp = handle_worker_request(req, worker_id, leader).await.unwrap();
-                        //     let resp = bincode::serialize(&resp).unwrap();
-                        //     s.send(resp.to_vec());
-                        // }
-                    });
-                }
-                Some(((worker_id, req), s)) = local_worker_stream.next() => {
-                    use rpc::leader::{Response, RequestLocal};
-                    trace!("leader: processing message from local worker");
-                    let req: RequestLocal = req;
-                    match req {
-                        RequestLocal::ConnectAndRegisterWorker(executor) => {
-                            debug!("handshake");
-                            let worker = Worker {
-                                exec: WorkerExec::Local(executor),
-                                entities: vec![],
-                                is_blocking_step: false,
-                                furthest_agreed_step: 0,
-                            };
-                            let id = Uuid::new_v4();
-
-                            let resp = leader.execute(manager::Request::GetWorkers).await;
-
-                            match resp {
-                                Ok(resp) => match resp {
-                                    Ok(resp) => {
-                                        let workers = if let manager::Response::Workers(w) = resp { w } else { unimplemented!() };
-
-                                        if workers.is_empty() {
-                                            // leader.lock().await.workers.insert(id, worker);
-                                            leader.execute(manager::Request::InsertWorker(id, worker)).await.unwrap();
-                                        }
-
-                                        s.send(Ok(Response::Register { worker_id: id }));
-                                    },
-                                    Err(e) => {
-                                        error!("{}", e.to_string());
-                                        s.send(Err(e));
-                                    },
-                                },
-                                Err(e) => {
-                                    error!("{}", e.to_string());
-                                    s.send(Err(e.into()));
-                                }
+                        let req: Request = match decode(&bytes, Encoding::Bincode) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("failed decoding request (bincode)");
+                                return;
                             }
-
-
-                            // if let Some(model) = &leader.model {
-                            // }
-
-                        }
-                        RequestLocal::Request(req) => {
-                            debug!("req: {:?}", req);
-                            let resp = handle_worker_request(req, worker_id, &leader).await;
-                            s.send(resp);
-                        }
-                        _ => todo!()
-
-                    }
+                        };
+                        let resp = handle_network_request(req, manager.clone(), maybe_con, runtime.clone()).await;
+                        s.send(encode(resp, Encoding::Bincode).unwrap()).unwrap();
+                    });
                 }
                 _ = shutdown.recv() => break,
             }
@@ -390,22 +317,71 @@ pub fn spawn(
     Ok(LeaderHandle {
         ctl: local_ctl_executor,
         worker_exec: local_worker_executor,
-        worker_id: None,
     })
+}
+
+async fn handle_local_worker_request(
+    req: rpc::leader::RequestLocal,
+    worker_id: WorkerId,
+    manager: ManagerExec,
+    runtime: runtime::Handle,
+) -> Result<rpc::leader::Response> {
+    use rpc::leader::{RequestLocal, Response};
+    match req {
+        RequestLocal::ConnectAndRegisterWorker(executor) => {
+            let worker = Worker::new(worker_id, WorkerExec::Local(executor));
+            let id = Uuid::new_v4();
+
+            let resp = manager.execute(manager::Request::GetWorkers).await;
+
+            match resp {
+                Ok(resp) => match resp {
+                    Ok(resp) => {
+                        let workers = if let manager::Response::Workers(w) = resp {
+                            w
+                        } else {
+                            unimplemented!()
+                        };
+                        trace!(
+                            "leader: ConnectAndRegisterWorker: current number of workers: {}",
+                            workers.len()
+                        );
+                        manager
+                            .execute(manager::Request::AddWorker(worker))
+                            .await
+                            .unwrap();
+
+                        Ok(Response::Register { worker_id: id })
+                    }
+                    Err(e) => {
+                        error!("{}", e.to_string());
+                        Err(e)
+                    }
+                },
+                Err(e) => {
+                    error!("{}", e.to_string());
+                    Err(e.into())
+                }
+            }
+
+            // if let Some(model) = &leader.model {
+            // }
+        }
+        RequestLocal::Request(req) => {
+            debug!("req: {:?}", req);
+            handle_worker_request(req, worker_id, manager, runtime).await
+        }
+        _ => todo!(),
+    }
 }
 
 pub async fn handle_worker_request(
     req: rpc::leader::Request,
-    worker_id: Option<WorkerId>,
-    leader: &ManagerExec,
+    worker_id: WorkerId,
+    leader: ManagerExec,
+    runtime: runtime::Handle,
 ) -> Result<rpc::leader::Response> {
     use rpc::leader::{Request, Response};
-
-    let worker_id = if let Request::Register(token) = req {
-        unimplemented!()
-    } else {
-        worker_id.ok_or(Error::WorkerNotRegistered("".to_string()))?
-    };
 
     match req {
         Request::PullModel(model) => {
@@ -419,10 +395,8 @@ pub async fn handle_worker_request(
         }
         Request::Ping(bytes) => Ok(Response::Ping(bytes)),
         Request::Model => {
-            unimplemented!();
-            // if let Some(model) = &leader.model {
-            //     Ok(Response::Model(model.clone()))
-            // }
+            let model = leader.get_model().await?;
+            Ok(Response::Model(model))
         }
         // Request::MemorySize => {
         //     println!("memory size unknown");
@@ -452,11 +426,7 @@ pub async fn handle_worker_request(
             // }
             Ok(Response::Empty)
         }
-        Request::Register(_) => {
-            debug!(">> request: register");
-            unimplemented!()
-        }
-        _ => todo!(),
+        _ => handle_request(req, leader, runtime).await,
     }
 }
 
@@ -468,11 +438,10 @@ async fn handle_local_controller_request(
     match req {
         rpc::leader::RequestLocal::ConnectToWorker(leader_worker, worker_leader) => {
             let mut resp = leader_worker
-                .execute(rpc::worker::RequestLocal::ConnectLeader(worker_leader))
+                .execute(rpc::worker::RequestLocal::IntroduceLeader(worker_leader))
                 .await?;
             resp.and_then(|r| {
-                if let rpc::worker::Response::Connect = r {
-                    // TODO
+                if let rpc::worker::Response::Empty = r {
                     Ok(rpc::worker::Response::Empty)
                 } else {
                     Err(Error::UnexpectedResponse("".to_string()))
@@ -488,35 +457,34 @@ async fn handle_local_controller_request(
     }
 }
 
-/// Controller sends requests to be executed by the controller.
 async fn handle_controller_request(
     req: rpc::leader::Request,
     leader: ManagerExec,
     runtime: runtime::Handle,
 ) -> Result<rpc::leader::Response> {
-    trace!("leader: processing controller request");
+    trace!("leader: processing controller request: {req:?}");
     match req {
         // Pull in a new project into the cluster and load it as the current
         // project, replacing the last project.
-        rpc::leader::Request::PullModel(model) => {
+        Request::PullModel(model) => {
             leader.pull_model(model).await?;
             Ok(rpc::leader::Response::Empty)
         }
         // Initialize the cluster using provided scenario. Scenario must be
         // present in the currently loaded project.
-        rpc::leader::Request::Initialize { scenario } => {
-            println!("initializing");
+        Request::Initialize { scenario } => {
+            println!("leader: initializing");
             let model = leader.get_model().await?;
             initialize(model, leader, runtime).await?;
             Ok(rpc::leader::Response::Empty)
         }
         // Initialize processing a single step.
-        rpc::leader::Request::Step => {
+        Request::Step => {
             trace!("leader start processing step");
             process_step(leader, runtime).await?;
             Ok(rpc::leader::Response::Empty)
         }
-        rpc::leader::Request::ConnectToWorker { address } => {
+        Request::ConnectToWorker(address) => {
             unimplemented!()
             // let bind = SocketAddr::from_str("0.0.0.0:0").unwrap();
             // // let endpoint = quinn::Endpoint::client(a).unwrap();
@@ -553,7 +521,103 @@ async fn handle_controller_request(
             // // println!("response: {:?}", resp);
             // sender.send(Ok(resp));
         }
-        _ => unimplemented!("{:?}", req),
+        Request::Clock => Ok(rpc::leader::Response::Clock(leader.get_clock().await?)),
+        _ => handle_request(req, leader, runtime).await,
+    }
+}
+
+/// Handler containing additional net caller information.
+async fn handle_network_request(
+    req: rpc::leader::Request,
+    manager: ManagerExec,
+    maybe_con: ConnectionOrAddress,
+    runtime: runtime::Handle,
+) -> Result<rpc::leader::Response> {
+    match req {
+        Request::IntroduceWorker(id) => {
+            let exec = match maybe_con {
+                ConnectionOrAddress::Connection(con) => WorkerExec::Remote(RemoteExec::new(con)),
+                ConnectionOrAddress::Address(_) => unimplemented!(),
+            };
+            manager.add_worker(id, exec).await?;
+            Ok(Response::Empty)
+        }
+        _ => handle_request(req, manager, runtime).await,
+    }
+}
+
+async fn handle_request(
+    req: rpc::leader::Request,
+    manager: ManagerExec,
+    runtime: runtime::Handle,
+) -> Result<rpc::leader::Response> {
+    match req {
+        Request::Status => todo!(),
+        Request::ConnectToWorker(address) => {
+            let bind = SocketAddr::from_str("0.0.0.0:0").unwrap();
+            // let endpoint = quinn::Endpoint::client(a).unwrap();
+            trace!("worker: connecting to leader: {:?}", address);
+            let endpoint = net::quic::make_client_endpoint_insecure(bind).unwrap();
+            let connection = endpoint
+                .connect(address.address.try_into().unwrap(), "any")
+                .unwrap()
+                .await
+                .unwrap();
+            trace!(
+                "leader: connected to worker at: {}",
+                connection.remote_address()
+            );
+
+            let exec = RemoteExec::new(connection);
+            exec.execute(rpc::worker::Request::ConnectToLeader(None))
+                .await?;
+
+            let worker = Worker {
+                // HACK
+                id: Uuid::nil(),
+                exec: WorkerExec::Remote(exec),
+                entities: vec![],
+                is_blocking_step: false,
+                furthest_agreed_step: 0,
+            };
+
+            Ok(Response::Empty)
+        }
+        Request::PullModel(model) => todo!(),
+        Request::Initialize { scenario } => todo!(),
+        Request::Step => todo!(),
+        Request::Ping(vec) => todo!(),
+        Request::Clock => todo!(),
+        Request::Model => todo!(),
+        Request::ReadyUntil(_) => todo!(),
+        Request::SpawnEntity(name, prefab) => {
+            use rand::{rng, rngs::StdRng, seq::IteratorRandom, SeedableRng};
+
+            // spawn new entity on random worker
+            let workers = manager.get_workers().await?;
+            println!("workers: {}", workers.len());
+            if let Some((uuid, worker)) = workers.iter().choose(&mut StdRng::from_os_rng()) {
+                worker
+                    .execute(rpc::worker::Request::SpawnEntity(name, prefab))
+                    .await?;
+            }
+
+            Ok(Response::Empty)
+        }
+        Request::GetWorkers => {
+            let _workers = manager.get_workers().await?;
+            let mut workers = FnvHashMap::default();
+            for (worker_id, worker) in _workers {
+                match worker.execute(rpc::worker::Request::GetListeners).await? {
+                    rpc::worker::Response::GetListeners(listeners) => {
+                        workers.insert(worker_id, listeners)
+                    }
+                    _ => continue,
+                };
+            }
+            Ok(Response::GetWorkers(workers))
+        }
+        Request::IntroduceWorker(uuid) => unreachable!(),
     }
 }
 
@@ -564,22 +628,15 @@ async fn process_step(leader: ManagerExec, runtime: runtime::Handle) -> Result<(
     let mut joins = Vec::new();
     for (worker_id, worker) in &workers {
         joins.push(async move {
-            match &worker.exec {
-                WorkerExec::Remote(_) => unimplemented!(),
-                WorkerExec::Local(le) => {
-                    let resp = le
-                        .execute(rpc::worker::RequestLocal::Request(
-                            rpc::worker::Request::IsBlocking { wait: true },
-                        ))
-                        .await
-                        .unwrap();
-                    if let Ok(rpc::worker::Response::IsBlocking(false)) = resp {
-                        return;
-                    } else {
-                        error!("{:?}", resp);
-                        return;
-                    }
-                }
+            let resp = worker
+                .execute(rpc::worker::Request::IsBlocking { wait: true })
+                .await;
+
+            if let Ok(rpc::worker::Response::IsBlocking(false)) = resp {
+                return;
+            } else {
+                error!("{:?}", resp);
+                return;
             }
         });
     }
@@ -589,22 +646,12 @@ async fn process_step(leader: ManagerExec, runtime: runtime::Handle) -> Result<(
     let mut joins = Vec::new();
     for (worker_id, worker) in workers.clone() {
         let h = runtime.spawn(async move {
-            match &worker.exec {
-                WorkerExec::Remote(_) => unimplemented!(),
-                WorkerExec::Local(le) => {
-                    let resp = le
-                        .execute(rpc::worker::RequestLocal::Request(
-                            rpc::worker::Request::Step,
-                        ))
-                        .await
-                        .unwrap();
-                    if let Ok(rpc::worker::Response::Step) = resp {
-                        return;
-                    } else {
-                        error!("{:?}", resp);
-                        return;
-                    }
-                }
+            let resp = worker.execute(rpc::worker::Request::Step).await;
+            if let Ok(rpc::worker::Response::Step) = resp {
+                return;
+            } else {
+                error!("{:?}", resp);
+                return;
             }
         });
         joins.push(h);
@@ -630,6 +677,10 @@ async fn initialize_with_scenario(
 /// Initializes cluster with the provided model.
 async fn initialize(model: Model, leader: ManagerExec, runtime: runtime::Handle) -> Result<()> {
     println!(">>> leader: initialize");
+    println!(
+        ">>>>> leader workers: {:?}",
+        leader.get_workers().await?.into_keys()
+    );
 
     // first set the leader model
     leader.set_model(model.clone()).await?;
@@ -637,12 +688,11 @@ async fn initialize(model: Model, leader: ManagerExec, runtime: runtime::Handle)
     // initialize workers
     let workers = leader.get_workers().await?;
     for (_, worker) in workers {
+        // TODO: parallelize
         worker
-            .execute(rpc::worker::Request::Initialize {
-                model: model.clone(),
-                mod_script: true,
-            })
+            .execute(rpc::worker::Request::SetModel(model.clone()))
             .await?;
+        worker.execute(rpc::worker::Request::Initialize).await?;
     }
 
     Ok(())

@@ -50,7 +50,7 @@ pub async fn handle_advance_request(
 
     // server.lock().await.blocked.0.send(false);
 
-    println!("waiting for clock to change..");
+    debug!("waiting for clock to change..");
 
     while clock_watch.changed().await.is_ok() {
         let current_clock = clock_watch.borrow().clone();

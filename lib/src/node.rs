@@ -21,12 +21,12 @@ use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
 use crate::executor::{Executor, LocalExec};
-use crate::net::{CompositeAddress, Encoding, Transport};
+use crate::net::{CompositeAddress, ConnectionOrAddress, Encoding, Transport};
 use crate::rpc::node::{Request, Response};
 use crate::time::Duration;
 use crate::util::Shutdown;
 use crate::util_net::{decode, encode};
-use crate::worker::{WorkerConfig, WorkerHandle};
+use crate::worker::{Config as WorkerConfig, WorkerHandle};
 use crate::{leader, net, rpc, server, worker, Error, Relay, Result, ServerConfig};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -90,22 +90,14 @@ pub fn spawn(
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
 ) -> Result<NodeHandle> {
-    let (sender, receiver) =
-        tokio::sync::mpsc::channel::<(Request, oneshot::Sender<Result<Response>>)>(20);
-    let mut local_stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
-    let local_exec = LocalExec::new(sender);
+    let (local_exec, mut local_stream) = LocalExec::new(20);
 
-    // Channel for broadcasting network messages to the main handler.
-    // Addressing of responses is based on endpoint address of the
-    // incoming message.
+    // TODO: channel for broadcasting network messages to the main handler.
+    // Addressing of responses is based on endpoint address of the incoming
+    // message.
     // let (net_sender, net_receiver) = tokio::sync::broadcast::channel::<(SocketAddr, Vec<u8>)>(20);
-    let (mut net_sender, net_receiver) = tokio::sync::mpsc::channel::<(
-        (SocketAddr, Vec<u8>),
-        tokio::sync::oneshot::Sender<Vec<u8>>,
-    )>(20);
-    // Make the network channel receiver into a stream
-    let mut net_stream = tokio_stream::wrappers::ReceiverStream::new(net_receiver);
-    let net_exec = LocalExec::new(net_sender);
+
+    let (net_exec, mut net_stream) = LocalExec::new(20);
 
     net::spawn_listeners(
         listeners,
@@ -209,10 +201,11 @@ fn handle_request(
                 }
             });
 
-            Ok(rpc::node::Response::SpawnWorker {
-                listeners,
-                server_addr: server_handle.listeners.first().cloned(),
-            })
+            unimplemented!()
+            // Ok(rpc::node::Response::SpawnWorker {
+            //     listeners,
+            //     server_addr: server_handle.listeners.first().cloned(),
+            // })
         }
         Request::SpawnLeader { listeners, config } => {
             let leader_handle =

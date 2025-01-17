@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
 
     println!("entities: {:?}", sim.entities().await?);
 
-    // spawn new machine processor for executing commands
+    // spawn new machine behavior for executing commands
     let machine = sim.spawn_machine().await?;
 
     // support amalgamating input using escape sequence `\\`
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
             commands.push(command);
         }
 
-        // execute commands on the machine processor
+        // execute commands on the machine behavior
         // machine.execute_cmd_batch(commands).await.map(|_| ())?;
 
         // TODO: remove

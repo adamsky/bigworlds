@@ -1,18 +1,19 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use futures::future::BoxFuture;
 use tokio::runtime;
 use uuid::Uuid;
 
 use crate::entity::Entity;
 use crate::executor::{Executor, LocalExec};
 use crate::leader::{LeaderConfig, LeaderHandle};
-use crate::processor;
 use crate::rpc::msg::{AdvanceRequest, Message, RegisterClientRequest, RegisterClientResponse};
 use crate::rpc::worker::RequestLocal;
 use crate::server::ServerHandle;
 use crate::util::Shutdown;
-use crate::worker::WorkerConfig;
+use crate::worker::Config as WorkerConfig;
+use crate::{behavior, string};
 use crate::{
     leader, rpc, server, worker, Address, EntityId, EntityName, Error, Model, Result, ServerConfig,
     Var, WorkerHandle,
@@ -21,13 +22,6 @@ use crate::{
 #[cfg(feature = "machine")]
 use crate::machine::MachineHandle;
 
-/// Handle to local simulation instance.
-pub struct SimHandle {
-    pub server: ServerHandle,
-    pub leader: LeaderHandle,
-    pub worker: WorkerHandle,
-}
-
 /// Spawns a local simulation instance.
 ///
 /// This is a convenient method for setting up a simulation instance with
@@ -35,7 +29,12 @@ pub struct SimHandle {
 ///
 /// Such spawned simulation still needs to be initialized with a model. See
 /// `SimHandle::initialize` or `SimHandle::spawn_from`.
-pub async fn spawn(runtime: runtime::Handle, shutdown: Shutdown) -> Result<SimHandle> {
+pub async fn spawn(shutdown: Shutdown) -> Result<SimHandle> {
+    spawn_on(tokio::runtime::Handle::current(), shutdown).await
+}
+
+/// Spawns a local simulation instance on the provided runtime.
+pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<SimHandle> {
     // spawn leader task
     let mut leader_handle = leader::spawn(
         vec![],
@@ -53,7 +52,9 @@ pub async fn spawn(runtime: runtime::Handle, shutdown: Shutdown) -> Result<SimHa
     )?;
 
     // make sure leader and worker can talk to each other
-    leader_handle.connect_to_worker(&worker_handle).await?;
+    leader_handle
+        .connect_to_worker(&worker_handle, true)
+        .await?;
 
     // spawn server task
     let mut server_handle = server::spawn(
@@ -112,7 +113,7 @@ pub async fn spawn_from(
     shutdown: Shutdown,
 ) -> Result<SimHandle> {
     // Spawn a raw simulation instance.
-    let sim_handle = spawn(runtime, shutdown).await?;
+    let sim_handle = spawn_on(runtime, shutdown).await?;
 
     // Initialize the simulation using provided model.
     sim_handle.pull_model(model).await?;
@@ -143,6 +144,13 @@ pub async fn spawn_from_path(
     spawn_from(model, scenario, runtime, shutdown).await
 }
 
+/// Handle to local simulation instance.
+pub struct SimHandle {
+    pub server: ServerHandle,
+    pub leader: LeaderHandle,
+    pub worker: WorkerHandle,
+}
+
 impl SimHandle {
     /// Registers new machine for instancing based on requirements.
     // TODO: provide machine instructions as argument?
@@ -161,39 +169,34 @@ impl SimHandle {
         use crate::machine;
 
         let runtime = tokio::runtime::Handle::current();
-        let machine = machine::spawn(self.worker.processor_exec.clone(), runtime)?;
+        let machine = machine::spawn(self.worker.behavior_exec.clone(), runtime)?;
         Ok(machine)
     }
 
-    /// Spawns new processor task based on the provided closure.
+    /// Spawns new behavior task based on the provided closure.
     ///
     /// Takes in an optional collection of triggers. `None` means
-    /// a "continuous" processor without explicit external triggering.
-    pub async fn spawn_processor<Fut>(
+    /// a "continuous" behavior  without explicit external triggering.
+    pub async fn spawn_behavior(
         &mut self,
         f: impl FnOnce(
-                tokio_stream::wrappers::ReceiverStream<(
-                    rpc::processor::Request,
-                    tokio::sync::oneshot::Sender<Result<rpc::processor::Response>>,
-                )>,
-                LocalExec<rpc::worker::Request, Result<rpc::worker::Response>>,
-            ) -> Fut
-            + Send
-            + 'static,
-    ) -> Result<processor::ProcessorHandle>
-    where
-        Fut: futures::Future<Output = Result<()>> + Send + 'static,
-    {
+            tokio_stream::wrappers::ReceiverStream<(
+                rpc::behavior::Request,
+                tokio::sync::oneshot::Sender<Result<rpc::behavior::Response>>,
+            )>,
+            LocalExec<rpc::worker::Request, Result<rpc::worker::Response>>,
+        ) -> BoxFuture<'static, Result<()>>,
+    ) -> Result<behavior::BehaviorHandle> {
         let runtime = tokio::runtime::Handle::current();
-        processor::spawn(f, self.worker.processor_exec.clone(), runtime)
+        behavior::spawn_synced(f, self.worker.behavior_exec.clone(), runtime)
     }
 
     /// Publishes an event accross the simulation.
     pub async fn invoke(&mut self, event: &str) -> Result<()> {
         self.worker
-            .ctl_exec
+            .ctl
             .execute(rpc::worker::RequestLocal::Request(
-                rpc::worker::Request::Trigger(event.to_string()),
+                rpc::worker::Request::Trigger(string::new_truncate(event)),
             ))
             .await??;
         Ok(())
@@ -208,13 +211,15 @@ impl SimHandle {
     /// wider synchronization of different elements.
     ///
     /// Synchronization is not required however. It's possible that none of the
-    /// `processor`s, `server`s, etc. that are part of a particular system
+    /// `behavior`s, `server`s, etc. that are part of a particular system
     /// will choose to observe and/or act upon `step` events.
     ///
     /// It's also possible that it will be a mixed bag, some parts of a system
     /// can make use of synchronization and others can remain "real-time".
     pub async fn step(&mut self) -> Result<()> {
         use crate::rpc::server::Request as ServerRequest;
+
+        let now = std::time::Instant::now();
 
         debug!("simhandle step");
         let resp = self
@@ -225,6 +230,9 @@ impl SimHandle {
             }))
             .await??;
         debug!("got response from server: {:?}", resp);
+
+        println!("stepped in {}ms", now.elapsed().as_millis());
+
         Ok(())
     }
 
@@ -255,7 +263,7 @@ impl SimHandle {
     pub async fn initialize(&self, scenario: Option<String>) -> Result<()> {
         use rpc::leader::{Request, Response};
 
-        println!(">>> sim: apply scenairo");
+        println!(">>> sim: initializing! applying scenario: {scenario:?}");
 
         self.leader
             .ctl
@@ -273,16 +281,42 @@ impl SimHandle {
         unimplemented!()
     }
 
-    pub async fn spawn_entity(&self) -> Result<()> {
-        unimplemented!()
+    pub async fn spawn_entity(&self, name: String, prefab: String) -> Result<()> {
+        let resp = self
+            .leader
+            .ctl
+            .execute(rpc::leader::Request::SpawnEntity(name, prefab).into())
+            .await??;
+        match resp {
+            rpc::leader::Response::Empty => Ok(()),
+            _ => Err(Error::UnexpectedResponse(format!("{resp}"))),
+        }
     }
 
     pub async fn model(&mut self) -> Result<Model> {
-        unimplemented!()
+        Ok(self
+            .worker
+            .ctl
+            .execute(rpc::worker::Request::GetModel.into())
+            .await??
+            .try_into()?)
     }
 
     pub async fn get_var(&self, addr: Address) -> Result<Var> {
-        unimplemented!()
+        Ok(self
+            .worker
+            .ctl
+            .execute(rpc::worker::Request::GetVar(addr).into())
+            .await??
+            .try_into()?)
+    }
+
+    pub async fn set_var(&self, addr: Address, var: Var) -> Result<()> {
+        self.worker
+            .ctl
+            .execute(rpc::worker::Request::SetVar(addr, var).into())
+            .await??;
+        Ok(())
     }
 
     pub async fn get_clock(&self) -> Result<usize> {
@@ -293,31 +327,33 @@ impl SimHandle {
             unimplemented!()
         }
     }
+
+    /// Initiates proper shutdown by propagating the proper signal accross all
+    /// running tasks.
+    pub async fn shutdown(&self) -> Result<()> {
+        trace!("initiating shutdown on local sim instance");
+        self.worker.shutdown().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::rpc::msg::client_server::StatusRequest;
     use crate::rpc::msg::Message;
-    use crate::rpc::msg::StatusResponse;
     use crate::util::Shutdown;
     use crate::{sim, Executor, Result};
 
     #[tokio::test]
-    async fn status() -> Result<()> {
-        let runtime = tokio::runtime::Handle::current();
-        let shutdown = Shutdown::new();
-        let handle = sim::spawn(runtime, shutdown.clone()).await?;
+    async fn server_ping() -> Result<()> {
+        let handle = sim::spawn(Shutdown::new()).await?;
 
         let response = handle
             .server
-            .execute(Message::StatusRequest(StatusRequest {
-                format: "".to_string(),
-            }))
+            .execute(Message::PingRequest(vec![1; 5]))
             .await??;
 
-        // println!("{:?}", response);
-        shutdown.shutdown()?;
+        assert_eq!(response, Message::PingResponse(vec![1; 5]));
+
         Ok(())
     }
 }

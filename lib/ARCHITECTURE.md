@@ -30,20 +30,20 @@ Building on the storage layer is the logic layer.
 Bigworlds runtime builds directly on the tokio runtime, spawning separate tasks
 representing different parts of a bigworlds system.
 
-One part of the system spawned as a separate task is the `processor`. That's
-basically a free-form task running on the tokio runtime. Each processor unit
+One part of the system spawned as a separate task is the `behavior`. That's
+basically a free-form task running on the tokio runtime. Each behavior unit
 is a separate task performing read/write operations asynchronously, no matter
 if they're performed locally or remotely (though the system is constantly
 optimizing to maximize the number of local operations). Processing can
 optionally be synchronized with simulation-wide events.
 
-Spawning a processor task is the most direct way of introducing logic into
+Spawning a behavior task is the most direct way of introducing logic into
 a bigworlds system. These tasks can be defined as part of an overall program
 using bigworlds library, or they can be loaded dynamically onto existing
 bigworlds systems. Since it's not exactly safe in situations where hardware is
 shared, we definitely want to have a way to sandbox user provided logic. 
 
-For this we need a slightly more abstract `machine`. Machine is a processor
+For this we need a slightly more abstract `machine`. Machine is a behavior
 executing a set of predefined instructions in a certain manner, like a virtual
 machine. With it's basic support for event-triggered state changes, it can also
 resemble a state machine.

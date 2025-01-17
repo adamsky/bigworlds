@@ -27,7 +27,7 @@ use bigworlds::net;
 use bigworlds::net::{CompositeAddress, Transport};
 use bigworlds::util::get_snapshot_paths;
 use bigworlds::util::Shutdown;
-use bigworlds::worker::WorkerConfig;
+use bigworlds::worker::Config as WorkerConfig;
 use bigworlds::SimHandle;
 use bigworlds::{leader, server, worker, ServerConfig};
 use bigworlds::{rpc, Executor};
@@ -137,6 +137,13 @@ pub fn arg_matches() -> ArgMatches {
                     .long("address")
                     .short('a')
                     .help("Set the address for the worker")
+                    .value_name("address"),
+            )
+            .arg(
+                Arg::new("worker")
+                    .long("worker")
+                    .short('w')
+                    .help("Address of a remote worker to connect to")
                     .value_name("address"),
             )
             .arg(
@@ -294,20 +301,25 @@ async fn start_worker(
     // spawn worker task, returning a handle with executors
     let mut worker = worker::spawn(listeners, config, runtime.clone(), shutdown.clone())?;
 
+    // if worker addresses are specified, attempt to connect
+    if let Some(worker_addrs) = matches.get_many::<String>("worker") {
+        for addr in worker_addrs {
+            // let addr = addr.parse()?;
+            if let Err(e) = worker.connect_to_worker(addr).await {
+                error!("{e}");
+            }
+        }
+    }
+
     // if leader address is specified, attempt a connection
     if let Some(leader_addr) = matches.get_one::<String>("leader") {
         let leader_addr = leader_addr.parse()?;
         if let Err(e) = worker
-            .ctl_exec
-            .execute(
-                bigworlds::rpc::worker::Request::ConnectToLeader {
-                    address: leader_addr,
-                }
-                .into(),
-            )
+            .ctl
+            .execute(bigworlds::rpc::worker::Request::ConnectToLeader(Some(leader_addr)).into())
             .await
         {
-            error!("{}", e.to_string());
+            error!("{e}");
         }
     }
 

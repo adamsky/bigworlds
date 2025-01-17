@@ -1,4 +1,4 @@
-//! This example showcases attaching custom machine logic programmatically.
+//! This example showcases attaching custom behavior logic programmatically.
 
 #![allow(warnings)]
 
@@ -11,29 +11,29 @@ use bigworlds::{machine, rpc, sim, Executor, Query};
 async fn main() -> anyhow::Result<()> {
     let mut shutdown = Shutdown::new();
 
-    let mut sim = sim::spawn(tokio::runtime::Handle::current(), shutdown.clone()).await?;
+    let mut sim = sim::spawn(shutdown.clone()).await?;
 
     for n in 0..3 {
         let mut shutdown = shutdown.clone();
         let _ = sim
-            // Spawn a processor.
+            // Spawn a behavior.
             //
-            // Processor is code that runs in it's own task on the runtime.
+            // Behavior is code that runs in it's own task on the runtime.
             // It has raw access to the stream of events coming from worker,
             // it can also talk directly to worker using provided executor.
             //
-            // Here we spawn a processor from a closure.
-            .spawn_processor(|mut stream, worker| async move {
+            // Here we spawn a behavior from a closure.
+            .spawn_behavior(|mut stream, worker| Box::pin(async move {
 
-                // state can be persisted during lifetime of the processor
+                // state can be persisted during lifetime of the behavior
                 let state = "Hello, ".to_string();
 
                 tokio::select! {
                     Some((req, s)) = stream.next() => {
                         println!("next");
                         match req {
-                            rpc::processor::Request::Trigger(event) => println!("trigger sent: {event}"),
-                            rpc::processor::Request::Shutdown => println!("shutdown"),
+                            rpc::behavior::Request::Trigger(event) => println!("trigger sent: {event}"),
+                            rpc::behavior::Request::Shutdown => println!("shutdown"),
                         }
                     }
                     _ = shutdown.recv() => {
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
                 //     // println!("print from machine");
                 //     value *= 238192873;
 
-                //     use engine::msg::processor_worker::{Request, Response};
+                //     use engine::msg::behavior_worker::{Request, Response};
                 //     let response = worker
                 //         .execute(Request::Query(Query::new()))
                 //         .await
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
                 //     iterations += 1;
                 // }
-            })
+            }))
             .await;
     }
 

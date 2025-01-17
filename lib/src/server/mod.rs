@@ -23,16 +23,14 @@ use uuid::Uuid;
 
 use crate::error::{Error as CoreError, Error, Result as CoreResult};
 use crate::executor::{Executor, LocalExec, RemoteExec};
-use crate::leader::Leader;
-use crate::net::framed_tcp;
+use crate::net::{framed_tcp, ConnectionOrAddress};
 use crate::net::{CompositeAddress, Encoding, Transport};
-use crate::rpc::msg;
-use crate::rpc::msg::Message;
+use crate::rpc::msg::{self, Message};
 use crate::service::Service;
 use crate::time::Instant;
 use crate::util::Shutdown;
 use crate::util_net::{decode, encode};
-use crate::worker::WorkerId;
+use crate::worker::{WorkerExec, WorkerId};
 use crate::{
     model, net, rpc, string, Address, EntityName, EventName, Model, Query, QueryProduct, Relay,
     Result, StringId, VarType, WorkerHandle,
@@ -55,8 +53,11 @@ pub type ServerId = Uuid;
 
 /// Connected client as seen by server.
 pub struct Client {
-    // /// IP address of the client
-    // pub addr: String,
+    pub id: ClientId,
+
+    /// IP address of the client
+    pub addr: Option<SocketAddr>,
+
     /// Currently applied encoding as negotiated with the client
     pub encoding: Encoding,
 
@@ -113,21 +114,14 @@ pub struct Worker {
     pub server_id: Option<ServerId>,
 }
 
-#[derive(Clone)]
-pub enum WorkerExec {
-    /// Remote executor for sending requests to worker over the wire
-    Remote(RemoteExec<rpc::worker::Request, rpc::worker::Response>),
-    /// Local executor for sending requests to worker within the same runtime
-    Local(LocalExec<(Option<ServerId>, rpc::worker::RequestLocal), Result<rpc::worker::Response>>),
-}
-
 #[async_trait::async_trait]
 impl Executor<rpc::worker::Request, rpc::worker::Response> for Worker {
     async fn execute(&self, req: rpc::worker::Request) -> CoreResult<rpc::worker::Response> {
         match &self.exec {
-            WorkerExec::Remote(remote_exec) => remote_exec.execute(req).await,
+            WorkerExec::Remote(remote_exec) => remote_exec.execute(req).await?,
             WorkerExec::Local(local_exec) => local_exec
-                .execute((self.server_id, rpc::worker::RequestLocal::Request(req)))
+                // .execute((self.server_id, rpc::worker::RequestLocal::Request(req)))
+                .execute(rpc::worker::RequestLocal::Request(req))
                 .await
                 .map_err(|e| CoreError::Other(e.to_string()))?
                 .map_err(|e| CoreError::Other(e.to_string())),
@@ -238,9 +232,6 @@ pub struct Server {
 
     /// Map of all clients by their unique identifier.
     pub clients: FnvHashMap<ClientId, Client>,
-    /// Map of client ids by their remote address. Not all clients are listed
-    /// here as not all clients are connecting through network sockets.
-    pub clients_by_addr: FnvHashMap<SocketAddr, ClientId>,
 
     /// Time of creation of this server
     pub started_at: Instant,
@@ -266,8 +257,7 @@ pub struct ServerHandle {
     pub worker:
         LocalExec<(Option<WorkerId>, rpc::server::RequestLocal), Result<rpc::server::Response>>,
     pub worker_id: Option<WorkerId>,
-
-    pub listeners: Vec<CompositeAddress>,
+    // pub listeners: Vec<CompositeAddress>,
 }
 
 #[async_trait::async_trait]
@@ -301,7 +291,7 @@ impl ServerHandle {
 
         // connect worker to server
         let resp = worker_handle
-            .ctl_exec
+            .ctl
             .execute(rpc::worker::RequestLocal::ConnectToServer(
                 _server_id,
                 self.worker.clone(),
@@ -326,97 +316,33 @@ pub fn spawn(
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
 ) -> Result<ServerHandle> {
-    // controller requests channel
-    let (mut local_ctl_sender, local_ctl_receiver) = tokio::sync::mpsc::channel::<(
-        rpc::server::RequestLocal,
-        tokio::sync::oneshot::Sender<Result<rpc::server::Response>>,
-    )>(20);
-    let mut local_ctl_stream = tokio_stream::wrappers::ReceiverStream::new(local_ctl_receiver);
-    let mut local_ctl_executor = LocalExec::new(local_ctl_sender);
-
-    let (local_worker_sender, local_worker_receiver) = tokio::sync::mpsc::channel::<(
-        (Option<WorkerId>, rpc::server::RequestLocal),
-        tokio::sync::oneshot::Sender<Result<rpc::server::Response>>,
-    )>(20);
-    // Make the handle interface channel receiver into a stream
-    let mut local_worker_stream =
-        tokio_stream::wrappers::ReceiverStream::new(local_worker_receiver);
-    let local_worker_executor = LocalExec::new(local_worker_sender);
-
-    let (remote_worker_sender, remote_worker_receiver) = tokio::sync::mpsc::channel::<(
-        rpc::server::Request,
-        tokio::sync::oneshot::Sender<Result<rpc::server::Response>>,
-    )>(20);
-    // Make the handle interface channel receiver into a stream
-    let mut remote_worker_stream =
-        tokio_stream::wrappers::ReceiverStream::new(remote_worker_receiver);
-
-    // Channel to be returned as executor with server handle
-    let (local_client_sender, local_client_receiver) = tokio::sync::mpsc::channel::<(
-        (Option<ClientId>, Message),
-        tokio::sync::oneshot::Sender<Result<Message>>,
-    )>(20);
-    // Make the handle interface channel receiver into a stream
-    let mut local_client_stream =
-        tokio_stream::wrappers::ReceiverStream::new(local_client_receiver);
-
-    // Channel for broadcasting web server messages to the main handler.
-    let (http_client_sender, http_client_receiver) =
-        tokio::sync::mpsc::channel::<(Message, tokio::sync::oneshot::Sender<Result<Message>>)>(20);
-    // Make the handle interface channel receiver into a stream
-    let mut http_client_stream = tokio_stream::wrappers::ReceiverStream::new(http_client_receiver);
+    let (local_ctl_executor, mut local_ctl_stream) = LocalExec::new(20);
+    let (local_worker_executor, mut local_worker_stream) = LocalExec::new(20);
+    let (local_client_executor, mut local_client_stream) = LocalExec::new(20);
+    let (net_client_executor, mut net_client_stream) = LocalExec::new(20);
 
     // Web server can be enabled to serve data through an http(s) endpoint.
     #[cfg(feature = "http_server")]
     {
-        let client_web_interface = LocalExec::new(http_client_sender);
-        let handler = http::spawn(client_web_interface, shutdown.clone());
+        let (http_client_executor, mut http_client_stream) = LocalExec::new(20);
+        let handler = http::spawn(http_client_executor, shutdown.clone());
     }
-
-    let (mut net_client_sender, net_client_receiver) = tokio::sync::mpsc::channel::<(
-        (SocketAddr, Vec<u8>),
-        tokio::sync::oneshot::Sender<Vec<u8>>,
-    )>(20);
-    let mut net_client_stream = tokio_stream::wrappers::ReceiverStream::new(net_client_receiver);
-    let net_client_exec = LocalExec::new(net_client_sender);
 
     // Server operates multiple listeners, each on different transport.
     // Listeners run on separate tasks.
     // Once direct connection is established, encoding is negotiated.
-    for listener in &listeners {
-        match listener.transport {
-            Some(Transport::FramedTcp) => framed_tcp::spawn_listener(
-                listener.address.clone().try_into()?,
-                net_client_exec.clone(),
-                runtime.clone(),
-                shutdown.clone(),
-            ),
-            #[cfg(feature = "ws_transport")]
-            Some(Transport::WebSocket) => net::ws::spawn_listener(
-                listener.address.clone().try_into()?,
-                net_client_exec.clone(),
-                runtime.clone(),
-                shutdown.clone(),
-            ),
-            _ => unimplemented!("transport not supported: {:?}", listener.transport),
-        };
-        info!(
-            "listener started: encoding: {:?}, transport: {:?}, address: {:?}",
-            listener.encoding, listener.transport, listener.address
-        );
-    }
-
-    // For extra compatibility, as well as access to more exotic
-    // transports such UNIX domain sockets, we can add additional listening
-    // solutions with their own setups.
-    // TODO nng, zmq, laminar
+    net::spawn_listeners(
+        listeners,
+        net_client_executor,
+        runtime.clone(),
+        shutdown.clone(),
+    )?;
 
     // Spawn the server structure
     let mut server = Arc::new(Mutex::new(Server {
         worker: None,
         config,
         clients: Default::default(),
-        clients_by_addr: Default::default(),
         started_at: Instant::now(),
         last_msg_time: Instant::now(),
         last_accept_time: Instant::now(),
@@ -496,6 +422,7 @@ pub fn spawn(
         let mut blocked_rcv = _server.lock().await.blocked.1.clone();
         let mut worker = _server.lock().await.worker.clone();
         loop {
+            trace!("server loop start");
             if let Ok(_) = blocked_rcv.changed().await {
                 let is_blocked = *blocked_rcv.borrow();
                 if let Some(worker) = worker.as_ref() {
@@ -507,7 +434,8 @@ pub fn spawn(
                         .execute(rpc::worker::Request::SetBlocking(is_blocked))
                         .await
                     {
-                        // error!("{}", e);
+                        error!("{}", e);
+                        // panic!("{}", e);
                     }
                 } else {
                     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -521,8 +449,8 @@ pub fn spawn(
         }
     });
 
-    let runtime_c = runtime.clone();
     // Finally let's spawn the main handler task.
+    let runtime_c = runtime.clone();
     runtime.spawn(async move {
         let runtime = runtime_c;
 
@@ -546,14 +474,6 @@ pub fn spawn(
                         s.send(resp);
                     });
                 },
-                Some((req, s)) = remote_worker_stream.next() => {
-                    debug!("handling remote worker request: {:?}", req);
-                    unimplemented!();
-                    // runtime.clone().spawn(async move {
-                    //     let resp = handle_worker_request(req, worker_id, server.clone()).await;
-                    //     s.send(resp);
-                    // });
-                },
                 Some(((client_id, msg), s)) = local_client_stream.next() => {
                     debug!("handling local client msg: {:?}", msg);
                     let server = server.clone();
@@ -569,13 +489,14 @@ pub fn spawn(
                         error!("{:?}", e);
                     }
                 },
-                Some((m, s)) = http_client_stream.next() => {
-                    runtime.spawn(async move {
-                        debug!("handling web client msg: {:?}", m);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        s.send(Ok(Message::PingResponse(vec![])));
-                    });
-                },
+                // TODO
+                // Some((m, s)) = http_client_stream.next() => {
+                //     runtime.spawn(async move {
+                //         debug!("handling web client msg: {:?}", m);
+                //         tokio::time::sleep(Duration::from_secs(1)).await;
+                //         s.send(Ok(Message::PingResponse(vec![])));
+                //     });
+                // },
                 _ = shutdown.recv() => break,
             };
         }
@@ -583,8 +504,8 @@ pub fn spawn(
 
     Ok(ServerHandle {
         ctl: local_ctl_executor,
-        client: LocalExec::new(local_client_sender),
-        listeners,
+        client: local_client_executor,
+        // listeners,
         client_id: None,
         worker: local_worker_executor,
         worker_id: None,
@@ -600,9 +521,8 @@ async fn handle_local_ctl_request(
     match req {
         rpc::server::RequestLocal::ConnectToWorker(server_worker, worker_server) => {
             let mut resp = server_worker
-                .execute((
-                    None,
-                    rpc::worker::RequestLocal::ConnectAndRegisterServer(worker_server),
+                .execute(rpc::worker::RequestLocal::ConnectAndRegisterServer(
+                    worker_server,
                 ))
                 .await?
                 .map_err(|e| Error::FailedConnectingServerToWorker(e.to_string()))?;
@@ -691,6 +611,7 @@ async fn handle_worker_request(
     worker_id: Option<WorkerId>,
     server: Arc<Mutex<Server>>,
 ) -> Result<rpc::server::Response> {
+    debug!("server: handling worker request: {req}");
     match req {
         rpc::server::Request::Redirect => {
             unimplemented!();
@@ -714,29 +635,59 @@ async fn handle_local_client_request(
 }
 
 async fn handle_net_client_message(
-    peer_addr: SocketAddr,
+    caller: ConnectionOrAddress,
     bytes: Vec<u8>,
     server: Arc<Mutex<Server>>,
     runtime: runtime::Handle,
     s: oneshot::Sender<Vec<u8>>,
 ) -> Result<()> {
     let _server = server.lock().await;
-    let (encoding, client) = match _server.clients_by_addr.get(&peer_addr) {
-        Some(id) => match _server.clients.get(id) {
-            Some(client) => (client.encoding, Some(client)),
-            None => unreachable!(),
-        },
-        None => (Encoding::Json, None),
+
+    println!("caller: {}", caller);
+
+    let (encoding, client) = match caller {
+        ConnectionOrAddress::Address(addr) => {
+            println!("looking for client with addr: {addr}");
+            println!(
+                "all clients: {:?}",
+                _server
+                    .clients
+                    .iter()
+                    .map(|(_, c)| c.addr)
+                    .collect::<Vec<_>>()
+            );
+            match _server.clients.iter().find(|(_, c)| c.addr == Some(addr)) {
+                Some((_, client)) => {
+                    println!(
+                        "found client by addr: {addr}, encoding: {}",
+                        client.encoding
+                    );
+                    (client.encoding, Some(client))
+                }
+                None => {
+                    println!("client not found");
+                    (Encoding::Json, None)
+                }
+            }
+        }
+        ConnectionOrAddress::Connection(_) => unimplemented!(),
     };
 
     let msg: Message = decode(bytes.as_slice(), encoding)?;
     debug!("handling network msg: {:?}", msg);
 
-    let client_id = _server.clients_by_addr.get(&peer_addr).cloned();
+    let client_id = client.map(|c| c.id);
+
     drop(_server);
 
+    let caller_addr = if let ConnectionOrAddress::Address(addr) = caller {
+        Some(addr)
+    } else {
+        None
+    };
+
     runtime.clone().spawn(async move {
-        let resp = handle_message(client_id, Some(peer_addr), msg, server.clone()).await;
+        let resp = handle_message(client_id, caller_addr, msg, server.clone()).await;
         let resp = match resp {
             Ok(msg) => msg,
             Err(e) => {
@@ -767,6 +718,8 @@ async fn handle_message(
 
             // TODO support transport and encoding negotiation
             let client = Client {
+                id,
+                addr: peer_addr,
                 encoding: Encoding::Bincode,
                 is_blocking: req.is_blocking,
                 blocked: watch::channel(req.is_blocking),
@@ -783,7 +736,8 @@ async fn handle_message(
 
             server.lock().await.clients.insert(id, client);
             if let Some(peer_addr) = peer_addr {
-                server.lock().await.clients_by_addr.insert(peer_addr, id);
+                // HACK
+                // server.lock().await.clients_by_addr.insert(peer_addr, id);
             }
 
             return Ok(Message::RegisterClientResponse(
@@ -838,14 +792,7 @@ async fn handle_message(
             let resp = if let Some(worker) = server.lock().await.worker.as_ref() {
                 worker
                     .execute(
-                        Request::Query(Query {
-                            trigger: Trigger::Immediate,
-                            description: Description::Addressed,
-                            layout: Layout::Var,
-                            filters: vec![],
-                            mappings: vec![],
-                        })
-                        .into(),
+                        Request::Query(Query::default().description(Description::Addressed)).into(),
                     )
                     .await?
             } else {
@@ -879,7 +826,33 @@ async fn handle_message(
             }
             return Err(Error::Unknown);
         }
-        _ => unimplemented!("{:?}", msg),
+        Message::PingRequest(vec) => Ok(Message::PingResponse(vec)),
+        Message::ErrorResponse(_) => todo!(),
+        Message::PingResponse(vec) => todo!(),
+        Message::EntityListResponse(vec) => todo!(),
+        Message::RegisterClientRequest(register_client_request) => todo!(),
+        Message::RegisterClientResponse(register_client_response) => todo!(),
+        Message::StatusResponse(status_response) => todo!(),
+        Message::AdvanceResponse(advance_response) => todo!(),
+        Message::QueryResponse(query_product) => todo!(),
+        Message::SpawnEntitiesRequest(spawn_entities_request) => todo!(),
+        Message::SpawnEntitiesResponse(spawn_entities_response) => todo!(),
+        Message::DataPullRequest(data_pull_request) => todo!(),
+        Message::DataPullResponse(data_pull_response) => todo!(),
+        Message::TypedDataPullRequest(typed_data_pull_request) => todo!(),
+        Message::TypedDataPullResponse(typed_data_pull_response) => todo!(),
+        Message::DataTransferResponse(data_transfer_response) => todo!(),
+        Message::TypedDataTransferRequest(typed_data_transfer_request) => todo!(),
+        Message::TypedDataTransferResponse(typed_data_transfer_response) => todo!(),
+        Message::ScheduledDataTransferRequest(scheduled_data_transfer_request) => todo!(),
+        Message::ExportSnapshotRequest(export_snapshot_request) => todo!(),
+        Message::ExportSnapshotResponse(export_snapshot_response) => todo!(),
+        Message::UploadProjectArchiveRequest(upload_project_request) => todo!(),
+        Message::UploadProjectArchiveResponse(upload_project_response) => todo!(),
+        Message::ListScenariosRequest(list_scenarios_request) => todo!(),
+        Message::ListScenariosResponse(list_scenarios_response) => todo!(),
+        Message::LoadScenarioRequest(load_scenario_request) => todo!(),
+        Message::LoadScenarioResponse(load_scenario_response) => todo!(),
     }
 }
 

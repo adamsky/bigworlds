@@ -107,7 +107,7 @@ impl ShortLocalAddress {
 }
 
 /// Entity-scope address.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "small_stringid", derive(Copy))]
 pub struct LocalAddress {
     pub comp: CompName,
@@ -124,7 +124,7 @@ impl LocalAddress {
             Ok(LocalAddress {
                 comp: string::new_truncate(split[0]),
                 var_type: VarType::from_str(split[1])?,
-                var_name: string::new_truncate(split[1]),
+                var_name: string::new_truncate(split[2]),
             })
         } else {
             Err(Error::InvalidLocalAddress(s.to_string()))

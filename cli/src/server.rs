@@ -7,7 +7,7 @@ use tokio::runtime;
 use bigworlds::leader::LeaderConfig;
 use bigworlds::net::CompositeAddress;
 use bigworlds::util::Shutdown;
-use bigworlds::worker::{self, WorkerConfig};
+use bigworlds::worker::{self, Config as WorkerConfig};
 use bigworlds::{leader, ServerConfig};
 
 pub fn cmd() -> clap::Command {
@@ -245,8 +245,7 @@ pub async fn start(
         shutdown.clone(),
     )?;
     // initiate local connection to the leader
-    // worker.introduce_local_leader(leader.worker_exec).await?;
-    leader.connect_to_worker(&worker).await?;
+    leader.connect_to_worker(&worker, true).await?;
     println!("worker and leader pair initiated");
 
     // spawn server

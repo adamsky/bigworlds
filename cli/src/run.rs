@@ -208,8 +208,7 @@ async fn start_run_snapshot(path: PathBuf, matches: &ArgMatches, shutdown: Shutd
     info!("Running interactive session using snapshot at: {:?}", path);
 
     // start the local sim task
-    let mut sim =
-        bigworlds::sim::spawn(tokio::runtime::Handle::current(), shutdown.clone()).await?;
+    let mut sim = bigworlds::sim::spawn(shutdown.clone()).await?;
 
     let response = sim
         .server

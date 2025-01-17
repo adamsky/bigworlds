@@ -7,7 +7,7 @@ use fnv::FnvHashMap;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::executor::LocalExec;
-use crate::leader::{Leader, Worker, WorkerExec};
+use crate::leader::{State, Worker, WorkerExec};
 use crate::worker::WorkerId;
 use crate::{Error, Executor, Model, Result};
 
@@ -25,10 +25,20 @@ impl ManagerExec {
 
     pub async fn get_workers(&self) -> Result<FnvHashMap<WorkerId, Worker>> {
         let resp = self.execute(Request::GetWorkers).await??;
-        if let Response::Workers(we) = resp {
-            Ok(we)
+        if let Response::Workers(workers) = resp {
+            Ok(workers)
         } else {
-            unimplemented!()
+            Err(Error::UnexpectedResponse(format!("{resp}")))
+        }
+    }
+
+    pub async fn add_worker(&self, id: WorkerId, exec: WorkerExec) -> Result<()> {
+        let worker = Worker::new(id, exec);
+        let resp = self.execute(Request::AddWorker(worker)).await??;
+        if let Response::Empty = resp {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedResponse(format!("{resp}")))
         }
     }
 
@@ -46,7 +56,7 @@ impl ManagerExec {
         if let Response::GetModel(model) = resp {
             Ok(model)
         } else {
-            unimplemented!()
+            Err(Error::UnexpectedResponse(resp.to_string()))
         }
     }
 
@@ -60,11 +70,12 @@ impl ManagerExec {
     }
 }
 
-pub fn spawn(mut leader: Leader) -> Result<ManagerExec> {
-    let (snd, mut rcv) = mpsc::channel::<(Request, oneshot::Sender<Result<Response>>)>(32);
-    let exec = LocalExec::new(snd);
+pub fn spawn(mut leader: State) -> Result<ManagerExec> {
+    use tokio_stream::StreamExt;
+
+    let (exec, mut stream) = LocalExec::new(32);
     tokio::spawn(async move {
-        while let Some((req, snd)) = rcv.recv().await {
+        while let Some((req, snd)) = stream.next().await {
             let resp = handle_request(req, &mut leader).await;
             snd.send(resp);
         }
@@ -72,7 +83,7 @@ pub fn spawn(mut leader: Leader) -> Result<ManagerExec> {
     Ok(exec)
 }
 
-async fn handle_request(req: Request, mut leader: &mut Leader) -> Result<Response> {
+async fn handle_request(req: Request, mut leader: &mut State) -> Result<Response> {
     match req {
         Request::GetClock => Ok(Response::Clock(leader.clock)),
         Request::IncrementClock => {
@@ -80,13 +91,17 @@ async fn handle_request(req: Request, mut leader: &mut Leader) -> Result<Respons
             Ok(Response::Clock(leader.clock))
         }
         Request::GetWorkers => Ok(Response::Workers(leader.workers.clone())),
-        Request::WorkerCount => unimplemented!("worker count"),
-        Request::InsertWorker(worker_id, worker) => {
-            leader.workers.insert(worker_id, worker);
+        Request::AddWorker(worker) => {
+            leader.workers.insert(worker.id, worker);
             Ok(Response::Empty)
         }
+        Request::WorkerCount => unimplemented!("worker count"),
         Request::PullModel(model) => {
+            println!("leader: pulling model: {model:?}");
             leader.model = Some(model);
+
+            // propagate model to workers
+
             Ok(Response::Empty)
         }
         Request::GetModel => {
@@ -108,14 +123,14 @@ pub enum Request {
     GetClock,
     IncrementClock,
     GetWorkers,
+    AddWorker(Worker),
     WorkerCount,
-    InsertWorker(WorkerId, Worker),
     PullModel(Model),
     GetModel,
     SetModel(Model),
 }
 
-#[derive(Clone)]
+#[derive(Clone, strum::Display)]
 pub enum Response {
     Empty,
     Clock(usize),
@@ -123,14 +138,4 @@ pub enum Response {
     // WorkerExecs(Vec<WorkerExec>),
     WorkerCount(usize),
     GetModel(Model),
-}
-
-impl Display for Response {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Clock(clock) => write!(f, "Clock"),
-            // Self::WorkerExecs(_) => write!(f, "WorkerExecs"),
-            _ => unimplemented!(),
-        }
-    }
 }

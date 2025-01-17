@@ -71,7 +71,7 @@ pub struct StatusResponse {
 /// `is_blocking` specifies whether the client is a blocking client.
 /// A blocking client is one that has to explicitly agree for the server to
 /// start processing the next tick/turn.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RegisterClientRequest {
     pub name: String,
     pub is_blocking: bool,
@@ -119,7 +119,7 @@ pub struct DataTransferRequest {
     pub selection: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 // #[serde(untagged)]
 pub enum TransferResponseData {
     Typed(TypedSimDataPack),
@@ -134,7 +134,7 @@ pub enum TransferResponseData {
 /// data.
 ///
 /// `error` contains the report of any errors that might have occurred.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DataTransferResponse {
     pub data: TransferResponseData,
 }
@@ -160,7 +160,7 @@ pub struct VarSimDataPack {
 ///
 /// Each data type is represented by a set of key-value pairs, where
 /// keys are addresses represented with strings.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TypedSimDataPack {
     pub strings: HashMap<Address, String>,
     pub ints: HashMap<Address, crate::Int>,
@@ -234,13 +234,13 @@ pub struct TypedDataTransferRequest {
     pub selection: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TypedDataTransferResponse {
     pub data: TypedSimDataPack,
     pub error: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub enum PullRequestData {
     /// Request to pull a key-value map of addresses and vars in string-form
     Typed(TypedSimDataPack),
@@ -256,7 +256,7 @@ pub enum PullRequestData {
 
 /// Request the server to pull provided data into the main simulation
 /// database.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DataPullRequest {
     pub data: PullRequestData,
 }
@@ -271,7 +271,7 @@ pub struct DataPullResponse {
 
 /// Request the server to pull provided data into the main simulation
 /// database.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TypedDataPullRequest {
     pub data: TypedSimDataPack,
 }

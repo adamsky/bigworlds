@@ -97,7 +97,7 @@ impl RegisterVar {
         };
 
         if let Some(comp) = model.get_component_mut(comp_name) {
-            comp.vars.push(crate::model::VarModel {
+            comp.vars.push(crate::model::Var {
                 name: self.addr.var_name.clone(),
                 type_: self.addr.var_type,
                 default: self.val.clone(),
@@ -117,7 +117,7 @@ impl RegisterVar {
         };
 
         if let Some(comp) = model.get_component_mut(comp_name) {
-            comp.vars.push(crate::model::VarModel {
+            comp.vars.push(crate::model::Var {
                 name: self.addr.var_name.clone(),
                 type_: self.addr.var_type,
                 default: self.val.clone(),

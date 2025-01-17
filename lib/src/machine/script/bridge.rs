@@ -20,7 +20,7 @@ use crate::entity::Entity;
 use crate::error::Error;
 use crate::machine::cmd::{CentralRemoteCommand, Command, CommandResult, ExtCommand};
 use crate::machine::{cmd, exec, CommandPrototype, ErrorKind, LocationInfo};
-use crate::model::{EventModel, LogicModel, Model, PrefabModel, VarModel};
+use crate::model::{EventModel, LogicModel, Model, PrefabModel, Var as VarModel};
 use crate::{machine, Result};
 
 pub const FILE_EXTENSION: &'static str = ".os";

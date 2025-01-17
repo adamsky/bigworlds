@@ -23,7 +23,19 @@ pub struct LocalExec<IN, OUT> {
 }
 
 impl<IN, OUT> LocalExec<IN, OUT> {
-    pub fn new(sender: mpsc::Sender<(IN, oneshot::Sender<OUT>)>) -> Self {
+    pub fn new(
+        capacity: usize,
+    ) -> (
+        Self,
+        tokio_stream::wrappers::ReceiverStream<(IN, oneshot::Sender<OUT>)>,
+    ) {
+        let (mut sender, receiver) =
+            tokio::sync::mpsc::channel::<(IN, oneshot::Sender<OUT>)>(capacity);
+        let mut stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        (Self::new_from_sender(sender), stream)
+    }
+
+    pub fn new_from_sender(sender: mpsc::Sender<(IN, oneshot::Sender<OUT>)>) -> Self {
         Self { sender }
     }
 }
@@ -32,10 +44,11 @@ impl<IN, OUT> LocalExec<IN, OUT> {
 impl<IN: Send, OUT: Send> Executor<IN, OUT> for LocalExec<IN, OUT> {
     async fn execute(&self, msg: IN) -> Result<OUT> {
         let (sender, receiver) = oneshot::channel::<OUT>();
-        self.sender
-            .send((msg, sender))
-            .await
-            .map_err(|e| "interface failed, receiver dropped: {e}");
+        self.sender.send((msg, sender)).await.map_err(|e| {
+            Error::Other(format!(
+                "local executor failed sending, receiver dropped: {e}"
+            ))
+        })?;
         Ok(receiver.await?)
     }
 }
@@ -47,11 +60,15 @@ pub struct RemoteExec<IN, OUT> {
 }
 
 impl<IN, OUT> RemoteExec<IN, OUT> {
-    pub async fn new(connection: quinn::Connection) -> Result<Self> {
-        Ok(RemoteExec {
+    pub fn new(connection: quinn::Connection) -> Self {
+        RemoteExec {
             connection,
             phantom: Default::default(),
-        })
+        }
+    }
+
+    pub fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
     }
 }
 

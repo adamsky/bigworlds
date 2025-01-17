@@ -16,7 +16,7 @@ pub use sim::SimHandle;
 pub use worker::WorkerHandle;
 
 pub use address::Address;
-pub use executor::Executor;
+pub use executor::{Executor, LocalExec};
 pub use model::Model;
 pub use query::{Query, QueryProduct};
 pub use string::{LongString, ShortString, StringId};
@@ -36,17 +36,17 @@ pub mod rpc;
 pub mod util;
 pub mod util_net;
 
-pub mod leader;
-pub mod worker;
-
-pub mod server;
 pub mod service;
 pub mod sim;
 
+pub mod leader;
+pub mod node;
+pub mod server;
+pub mod worker;
+
+pub mod behavior;
 #[cfg(feature = "machine")]
 pub mod machine;
-pub mod node;
-pub mod processor;
 
 mod error;
 mod executor;

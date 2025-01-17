@@ -22,7 +22,7 @@ use toml::Value;
 
 use crate::address::{Address, LocalAddress, ShortLocalAddress};
 use crate::{
-    string, CompName, EntityName, EventName, PrefabName, ShortString, StringId, Var, VarName,
+    string, var, CompName, EntityName, EventName, PrefabName, ShortString, StringId, VarName,
     VarType,
 };
 
@@ -37,6 +37,22 @@ use crate::machine::START_STATE_NAME;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Scenario {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Behavior {
+    pub lib_path: String,
+    /// Name of the entry function
+    pub entry: String,
+}
+
+impl From<intermediate::Behavior> for Behavior {
+    fn from(i: intermediate::Behavior) -> Self {
+        Self {
+            lib_path: i.lib,
+            entry: i.entry,
+        }
+    }
 }
 
 /// Collection of all the information defining an actionable simulation.
@@ -70,9 +86,9 @@ pub struct Model {
     // pub scripts: Vec<String>,
     pub prefabs: Vec<PrefabModel>,
     pub components: Vec<Component>,
-    // pub behaviors: Vec<Behavior>,
-    // pub data: Vec<DataEntry>,
-    // pub data_files: Vec<DataFileEntry>,
+    pub behaviors: Vec<Behavior>,
+    pub data: Vec<DataEntry>,
+    pub data_files: Vec<DataFileEntry>,
     // pub data_imgs: Vec<DataImageEntry>,
     // pub services: Vec<ServiceModel>,
 
@@ -86,6 +102,8 @@ impl TryFrom<intermediate::Model> for Model {
     type Error = Error;
 
     fn try_from(im: intermediate::Model) -> Result<Self> {
+        println!("intermediate model: {:?}", im);
+
         let mut model = Self::default();
 
         for im_scenario in im.scenarios {
@@ -98,13 +116,20 @@ impl TryFrom<intermediate::Model> for Model {
             let mut component = Component::default();
             component.name = im_component.name;
             for (name, var) in im_component.vars {
-                component.vars.push(VarModel {
+                component.vars.push(Var {
                     name,
                     type_: VarType::String,
                     default: None,
                 });
             }
             model.components.push(component);
+        }
+
+        for im_behavior in im.behaviors {
+            // TODO: At this point we need to produce artifacts, so build rust
+            // projects, etc.
+
+            model.behaviors.push(im_behavior.into());
         }
 
         Ok(model)
@@ -630,7 +655,7 @@ pub struct Component {
     /// String identifier of the component
     pub name: CompName,
     /// List of variables that define the component's interface
-    pub vars: Vec<VarModel>,
+    pub vars: Vec<Var>,
 }
 
 impl From<intermediate::Component> for Component {
@@ -716,10 +741,10 @@ impl LogicModel {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct VarModel {
+pub struct Var {
     pub name: VarName,
     pub type_: VarType,
-    pub default: Option<Var>,
+    pub default: Option<crate::var::Var>,
 }
 
 // impl From<serde_json::Value> for VarModel {}

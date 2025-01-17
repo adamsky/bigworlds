@@ -1,3 +1,4 @@
+use fnv::FnvHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::executor::LocalExec;
@@ -19,7 +20,7 @@ pub enum RequestLocal {
     /// the runtime and relevant channels.
     ConnectToWorker(
         LocalExec<worker::RequestLocal, Result<worker::Response>>,
-        LocalExec<(Option<WorkerId>, RequestLocal), Result<Response>>,
+        LocalExec<(WorkerId, RequestLocal), Result<Response>>,
     ),
     ConnectAndRegisterWorker(LocalExec<worker::RequestLocal, Result<worker::Response>>),
     Request(Request),
@@ -37,34 +38,42 @@ impl From<Request> for RequestLocal {
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub enum Request {
+    /// Instruct the leader to reach out to the worker at provided address
+    ConnectToWorker(CompositeAddress),
+    /// Introduce the calling worker to the leader
+    // TODO: auth
+    IntroduceWorker(WorkerId),
+
+    /// Request full status update of the leader
     Status,
-    ConnectToWorker {
-        address: CompositeAddress,
-    },
     /// Request leader to pull incoming model as current model
+    // TODO: perhaps allow more granular *changes* to the model?
     PullModel(Model),
+    /// Make leader initialize the cluster, optionally using the provided
+    /// scenario
     Initialize {
         scenario: Option<String>,
     },
+    /// Step through the simulation
     Step,
 
-    /// Request simple echoing of sent bytes
-    Ping(Vec<u8>),
-    /// Introduce worker to leader
-    ///
-    /// # Authorization
-    ///
-    ///
-    Register(Token),
     /// Request the current simulation clock value on the leader
     Clock,
+    /// Request a list of all currently connected workers
+    GetWorkers,
     /// Request the complete model from leader
     Model,
 
     ReadyUntil(usize),
+
+    /// Spawn entity based on the provided prefab
+    SpawnEntity(String, String),
+
+    /// Request simple echoing of sent bytes
+    Ping(Vec<u8>),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, strum::Display)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -79,6 +88,7 @@ pub enum Response {
     Connect,
     Register { worker_id: WorkerId },
     Clock(usize),
+    GetWorkers(FnvHashMap<WorkerId, Vec<CompositeAddress>>),
     Model(Model),
     PullModel,
     StepUntil,

@@ -1,46 +1,14 @@
 //! Worker protocol.
-//!
-//! # Cluster initialization
-//!
-//! On cluster initialization, leader connects to listed worker
-//! addresses and sends introductory messages. Each worker creates
-//! a list of all the other workers in the cluster. This way all
-//! the workers can exchange information with each other without
-//! the need for centralized broker. Each worker keeps a map of entities
-//! and their current node location.
-//!
-//! Simulation initialization is signalled to workers by the leader.
-//! Necessary data (sim model) is sent over the network to each of the
-//! workers.
-//!
-//! ## Non-machine processing
-//!
-//! Processing a step requires handling incoming client chatter, which is
-//! mostly event invokes and step process requests (client blocking mechanism).
-//!
-//! ## Machine processing
-//!
-//! Runtime-level machine step processing consists of two phases: local and
-//! external.
-//!
-//! Local phase is performed in isolation by each of the workers.
-//! During this phase any external commands that were invoked are collected
-//! and stored.
-//!
-//! During the external phase each worker sends messages to other workers based
-//! on what has been collected in the previous phase. Messages are sent to
-//! proper peer nodes, since each external command is addressed to a specific
-//! entity, and worker keeps a map of entities and nodes owning them. It also
-//! has a map of nodes with I/O sockets, 2 sockets for each node.
 
 use crate::executor::LocalExec;
 use crate::net::CompositeAddress;
 use crate::server::ServerId;
 use crate::worker::WorkerId;
-use crate::{EntityId, EventName, Model, Query, Result};
+use crate::{Address, EntityId, EventName, Model, Query, Result, Var};
 
 use super::{leader, server};
 
+/// Local protocol is not meant to be serialized for over-the-wire transfer.
 #[derive(Clone)]
 pub enum RequestLocal {
     /// Introduce worker to leader with local channel.
@@ -50,31 +18,42 @@ pub enum RequestLocal {
     /// No auth is performed as requesting this already requires access to
     /// the runtime and relevant channels.
     ConnectToLeader(
-        LocalExec<(Option<WorkerId>, leader::RequestLocal), Result<leader::Response>>,
+        LocalExec<(WorkerId, leader::RequestLocal), Result<leader::Response>>,
         LocalExec<RequestLocal, Result<Response>>,
     ),
     ConnectToServer(
         Option<ServerId>,
         LocalExec<(Option<WorkerId>, server::RequestLocal), Result<server::Response>>,
-        LocalExec<(Option<ServerId>, RequestLocal), Result<Response>>,
+        LocalExec<RequestLocal, Result<Response>>,
     ),
-    ConnectLeader(LocalExec<(Option<WorkerId>, leader::RequestLocal), Result<leader::Response>>),
+    ConnectToWorker(),
+    IntroduceLeader(LocalExec<(WorkerId, leader::RequestLocal), Result<leader::Response>>),
     ConnectAndRegisterServer(
         LocalExec<(Option<WorkerId>, server::RequestLocal), Result<server::Response>>,
     ),
     Request(Request),
+    Shutdown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, strum::Display)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub enum Request {
-    WorkerStatus,
-    ConnectToLeader {
-        address: CompositeAddress,
-    },
+    ConnectToLeader(Option<CompositeAddress>),
+    /// Instructs the worker to reach out to a remote worker.
+    ConnectToWorker(CompositeAddress),
+    /// Introduces the calling worker to the remote worker.
+    IntroduceWorker(WorkerId),
+    GetLeader,
+
+    /// Gets the addresses at which the worker can be reached over the network.
+    GetListeners,
+
+    /// Gets worker status.
+    Status,
+
     NewRequirements {
         ram_mb: usize,
         disk_mb: usize,
@@ -83,13 +62,9 @@ pub enum Request {
 
     Ping(Vec<u8>),
     MemorySize,
-    Model,
     Entities,
     Clock,
-    Initialize {
-        model: Model,
-        mod_script: bool,
-    },
+    Initialize,
     Step,
     IsBlocking {
         wait: bool,
@@ -102,11 +77,22 @@ pub enum Request {
     /// Sets the interface receiver as "blocking" in terms of step advance
     SetBlocking(bool),
 
+    /// Returns the current model
+    GetModel,
+    /// Pulling a model is initiated by server client
     PullModel(Model),
+    /// Setting a model is more authoritative and comes from leader
+    // TODO: provide rationale behind the distinction
+    SetModel(Model),
 
-    Status,
+    /// Retrieves data from a single variable
+    GetVar(Address),
+    /// Performs an overwrite of existing data at the given address
+    SetVar(Address, Var),
 
     Trigger(EventName),
+
+    SpawnEntity(String, String),
 }
 
 impl Into<RequestLocal> for Request {
@@ -115,7 +101,7 @@ impl Into<RequestLocal> for Request {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, strum::Display)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -127,6 +113,11 @@ pub enum Response {
     ConnectToServer {
         worker_id: WorkerId,
     },
+    IntroduceWorker(WorkerId),
+    GetLeader(Option<std::net::SocketAddr>),
+
+    GetListeners(Vec<CompositeAddress>),
+
     WorkerStatus {
         uptime: usize,
     },
@@ -136,10 +127,9 @@ pub enum Response {
     NewRequirements,
     Empty,
 
-    Connect,
     MemorySize(usize),
     Ping(Vec<u8>),
-    Model(Model),
+    GetModel(Model),
     Entities {
         machined: Vec<EntityId>,
         non_machined: Vec<EntityId>,
@@ -159,12 +149,30 @@ pub enum Response {
     Status {
         worker_count: u32,
     },
+
+    GetVar(Var),
 }
 
-impl std::fmt::Display for Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+use crate::Error;
+
+impl TryInto<Model> for Response {
+    type Error = Error;
+
+    fn try_into(self) -> std::result::Result<Model, Self::Error> {
         match self {
-            _ => write!(f, "response doesn't implement display yet"),
+            Response::GetModel(model) => Ok(model),
+            _ => Err(Error::UnexpectedResponse(self.to_string())),
+        }
+    }
+}
+
+impl TryInto<Var> for Response {
+    type Error = Error;
+
+    fn try_into(self) -> std::result::Result<Var, Self::Error> {
+        match self {
+            Response::GetVar(var) => Ok(var),
+            _ => Err(Error::UnexpectedResponse(self.to_string())),
         }
     }
 }

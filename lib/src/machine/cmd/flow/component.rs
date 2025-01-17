@@ -12,7 +12,7 @@ use crate::machine::{
     CallInfo, CallStackVec, ComponentCallInfo, IfElseCallInfo, IfElseMetaData, ProcedureCallInfo,
     Registry,
 };
-use crate::model::{self, LogicModel, Model, VarModel};
+use crate::model::{self, LogicModel, Model, Var};
 use crate::{string, CompName, EntityId, EntityName, LongString, ShortString, StringId, VarType};
 
 pub const COMMAND_NAMES: [&'static str; 1] = ["component"];

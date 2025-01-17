@@ -3,23 +3,25 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use futures::TryFutureExt;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use tokio::runtime;
 use tokio_stream::StreamExt;
 
 use crate::executor::{Executor, LocalExec};
 use crate::util::Shutdown;
-use crate::Result;
+use crate::{Error, Result};
 
 pub fn spawn(
     address: SocketAddr,
-    exec: LocalExec<(SocketAddr, Vec<u8>), Vec<u8>>,
+    exec: LocalExec<(super::ConnectionOrAddress, Vec<u8>), Vec<u8>>,
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
-) {
-    runtime.clone().spawn(async move {
-        let (endpoint, _cert) = make_server_endpoint(address).unwrap();
+) -> Result<()> {
+    let (endpoint, _cert) =
+        make_server_endpoint(address).map_err(|e| Error::NetworkError(e.to_string()))?;
 
+    runtime.clone().spawn(async move {
         while let Some(conn) = endpoint.accept().await {
             let exec = exec.clone();
             info!("connection incoming");
@@ -31,25 +33,18 @@ pub fn spawn(
             });
         }
     });
+
+    Ok(())
 }
 
 async fn handle_connection(
-    exec: LocalExec<(SocketAddr, Vec<u8>), Vec<u8>>,
+    exec: LocalExec<(super::ConnectionOrAddress, Vec<u8>), Vec<u8>>,
     conn: quinn::Connecting,
     runtime: runtime::Handle,
 ) -> Result<()> {
-    trace!("handling connection");
-    let mut connection = conn.await.unwrap();
-    // let span = info_span!(
-    //     "connection",
-    //     remote = %connection.remote_address(),
-    //     protocol = %connection
-    //         .handshake_data()
-    //         .unwrap()
-    //         .downcast::<quinn::crypto::rustls::HandshakeData>().unwrap()
-    //         .protocol
-    //         .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
-    // );
+    let mut connection: quinn::Connection =
+        conn.await.map_err(|e| Error::NetworkError(e.to_string()))?;
+
     async {
         trace!("connection established");
 
@@ -61,7 +56,7 @@ async fn handle_connection(
             let (mut send, mut recv) = match stream {
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
                     warn!("connection closed");
-                    panic!();
+                    break;
                 }
                 Err(e) => {
                     error!("{:?}", e);
@@ -70,30 +65,38 @@ async fn handle_connection(
                 Ok(s) => s,
             };
 
-            // println!("got streams, start reading");
+            println!("got streams, start reading");
 
             let exec = exec.clone();
+            let connection = connection.clone();
             runtime.clone().spawn(async move {
                 let bytes = recv.read_to_end(100000000).await.unwrap();
-                // println!("read: {:?}", bytes);
 
-                let resp = exec.execute((remote_addr, bytes)).await.unwrap();
-                // println!("resp: {:?}", resp);
+                let resp = exec
+                    .execute((super::ConnectionOrAddress::Connection(connection), bytes))
+                    .await
+                    .unwrap();
 
                 send.write_all(&resp).await.unwrap();
-                send.finish().await.unwrap();
+                println!("written all");
 
-                // let fut = handle_request(root.clone(), stream);
-                // runtime.spawn(
-                //     async move {
-                //     },
-                // );
+                send.finish().await.unwrap();
             });
         }
     }
     // .instrument(span)
     .await;
     Ok(())
+}
+
+pub async fn make_connection(
+    endpoint_addr: SocketAddr,
+) -> std::result::Result<quinn::Connection, Box<dyn std::error::Error>> {
+    use std::str::FromStr;
+    let bind = SocketAddr::from_str("0.0.0.0:0")?;
+    let endpoint = make_client_endpoint_insecure(bind).unwrap();
+    let connection = endpoint.connect(endpoint_addr, "any")?.await?;
+    Ok(connection)
 }
 
 /// Constructs a QUIC endpoint configured for use as client-only.
@@ -188,6 +191,9 @@ fn configure_server() -> std::result::Result<(ServerConfig, Vec<u8>), Box<dyn st
     Arc::get_mut(&mut server_config.transport)
         .unwrap()
         .max_concurrent_uni_streams(0_u8.into());
+    Arc::get_mut(&mut server_config.transport)
+        .unwrap()
+        .keep_alive_interval(Some(std::time::Duration::from_secs(5)));
 
     Ok((server_config, cert_der))
 }

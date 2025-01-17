@@ -102,7 +102,7 @@ fn spawn_stream_handler(addr: SocketAddr) {
 
 pub fn spawn_listener(
     address: SocketAddr,
-    exec: LocalExec<(SocketAddr, Vec<u8>), Vec<u8>>,
+    exec: LocalExec<(super::ConnectionOrAddress, Vec<u8>), Vec<u8>>,
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
 ) {
@@ -144,7 +144,7 @@ pub fn spawn_listener(
                             runtime_cc.spawn(async move {
                                 // send the incoming message to the executor,
                                 // wait until it comes back with a response
-                                let resp_bytes = match exec_cc.clone().execute((addr_c, bytes)).await {
+                                let resp_bytes = match exec_cc.clone().execute((super::ConnectionOrAddress::Address(addr_c), bytes)).await {
                                     Ok(r) => r,
                                     Err(e) => {
                                         warn!("executor failed: {:?}", e);

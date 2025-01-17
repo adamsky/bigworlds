@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use fnv::FnvHashMap;
 
-use crate::Result;
 use crate::{util, MODEL_MANIFEST_FILE};
+use crate::{Result, StringId};
 
 /// Intermediate model representation. It's existence is predicated by the need
 /// to resolve differences between the readily deserializable file structure
@@ -27,7 +27,7 @@ pub struct Model {
     // pub scripts: Vec<String>,
     // pub prefabs: Vec<PrefabModel>,
     // pub components: Vec<ComponentModel>,
-    // pub data: Vec<DataEntry>,
+    pub data: FnvHashMap<String, String>,
     // pub data_files: Vec<DataFileEntry>,
     // pub data_imgs: Vec<DataImageEntry>,
     // pub services: Vec<ServiceModel>,
@@ -59,8 +59,17 @@ impl Model {
         loop {
             // pop another include
             if let Some(include) = to_include.pop() {
+                println!("including from path: {include}");
+
+                // TODO: expand wildcard
+                // if include.contains("*") {
+                //     let include_path = PathBuf::from(&include.repla);
+                //     if include_path.is_dir() {
+
+                //     }
+                // }
+
                 // read the include
-                // println!("including from path: {include}");
                 let mut include_model: Model = util::deser_struct_from_path(fs, &include)?;
                 // println!("include_model at {include}: {include_model:?}");
 
@@ -101,7 +110,8 @@ impl Model {
         self.meta.merge(other.meta);
         self.scenarios.extend(other.scenarios);
         self.behaviors.extend(other.behaviors);
-        // self.meta.
+        self.components.extend(other.components);
+        self.data.extend(other.data);
     }
 }
 
@@ -148,14 +158,19 @@ pub struct Scenario {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Behavior {
-    name: String,
+    pub name: String,
+    pub r#type: String,
+    pub path: String,
+    pub entry: String,
+    pub lib: String,
+    // targets:
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Component {
-    pub name: String,
-    pub vars: FnvHashMap<String, serde_json::Value>,
+    pub name: StringId,
+    pub vars: FnvHashMap<StringId, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,4 +180,11 @@ pub enum ScenarioData {
     String(String),
     Map(FnvHashMap<String, String>),
     Csv(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataEntry {
+    // Simple((String, String)),
+    // List((String, Vec<String>)),
+    // Grid((String, Vec<Vec<String>>)),
 }

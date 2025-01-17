@@ -1,6 +1,6 @@
 use crate::machine::cmd::Command;
 
-use super::processor;
+use super::behavior;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
@@ -11,9 +11,11 @@ pub enum Request {
     Execute(Command),
     ExecuteBatch(Vec<Command>),
     Step,
+
+    Behavior(super::behavior::Request),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)

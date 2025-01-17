@@ -8,14 +8,14 @@ use crate::error::{Error, Result};
 // 10 characters using the `tiny_stringid` feature.
 #[cfg(all(feature = "small_stringid", not(feature = "tiny_stringid")))]
 pub const STRING_ID_SIZE: usize = 23;
-#[cfg(all(feature = "small_stringid", feature = "tiny_stringid"))]
+#[cfg(all(not(feature = "small_stringid"), feature = "tiny_stringid"))]
 pub const STRING_ID_SIZE: usize = 10;
 
 /// Fixed-size string used internally for indexing objects.
 #[cfg(any(feature = "small_stringid", feature = "tiny_stringid"))]
 pub type StringId = ArrayString<STRING_ID_SIZE>;
 
-#[cfg(not(feature = "small_stringid"))]
+#[cfg(not(any(feature = "small_stringid", feature = "tiny_stringid")))]
 pub type StringId = String;
 
 /// Short fixed-size string.
@@ -32,11 +32,11 @@ pub fn new(s: &str) -> Result<String> {
     Ok(String::from(s))
 }
 
-#[cfg(feature = "small_stringid")]
+#[cfg(any(feature = "small_stringid", feature = "tiny_stringid"))]
 pub fn new_truncate(s: &str) -> ArrayString<STRING_ID_SIZE> {
     ArrayString::from(truncate_str(s, STRING_ID_SIZE as u8)).unwrap()
 }
-#[cfg(not(feature = "small_stringid"))]
+#[cfg(not(any(feature = "small_stringid", feature = "tiny_stringid")))]
 pub fn new_truncate(s: &str) -> String {
     String::from(s)
 }
@@ -58,9 +58,9 @@ pub(crate) fn truncate_str(slice: &str, size: u8) -> &str {
     }
 }
 
-#[cfg(any(feature = "small_stringid", feature = "tiny_stringid"))]
-impl From<&str> for StringId {
-    fn from(input: &str) -> StringId {
-        input.into()
-    }
-}
+// #[cfg(any(feature = "small_stringid", feature = "tiny_stringid"))]
+// impl From<&str> for StringId {
+//     fn from(input: &str) -> StringId {
+//         input.into()
+//     }
+// }

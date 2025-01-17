@@ -12,12 +12,12 @@ use super::{msg::Message, worker};
 #[derive(Clone)]
 pub enum RequestLocal {
     ConnectToWorker(
-        LocalExec<(Option<ServerId>, worker::RequestLocal), Result<worker::Response>>,
+        LocalExec<worker::RequestLocal, Result<worker::Response>>,
         LocalExec<(Option<WorkerId>, RequestLocal), Result<Response>>,
     ),
     ConnectAndRegisterWorker(
         Option<ServerId>,
-        LocalExec<(Option<ServerId>, worker::RequestLocal), Result<worker::Response>>,
+        LocalExec<worker::RequestLocal, Result<worker::Response>>,
     ),
     Request(Request),
 }
@@ -28,7 +28,7 @@ impl From<Request> for RequestLocal {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, strum::Display)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)

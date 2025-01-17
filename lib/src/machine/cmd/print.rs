@@ -100,7 +100,9 @@ impl PrintFmt {
             for (index, addr) in &self.inserts {
                 // match entity_db.get_var(&addr.storage_index_using(comp_uid.clone())) {
                 match machine
-                    .query(Query::new().filter(Filter::Component(addr.component.clone().unwrap())))
+                    .query(
+                        Query::default().filter(Filter::Component(addr.component.clone().unwrap())),
+                    )
                     .await
                 {
                     Ok(substring) => {

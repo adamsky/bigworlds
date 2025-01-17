@@ -10,7 +10,8 @@ pub type StorageIndex = (CompName, VarName);
 // type TypedStorageIndex = (StorageIndex, VarType);
 
 /// Entity's main data storage structure.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, deepsize::DeepSizeOf)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+// #[derive(deepsize::DeepSizeOf)]
 pub struct Storage {
     pub map: FnvHashMap<StorageIndex, Var>,
     // pub numbers: FnvHashMap<StorageIndex, Number>,
@@ -54,11 +55,10 @@ impl Storage {
     pub fn set_from_addr(&mut self, target: &Address, source: &Address) {
         unimplemented!();
     }
-    pub fn set_from_var(&mut self, target: &Address, comp_uid: Option<&CompName>, var: &Var) {
-        let target = self
-            .get_var_mut(&(target.component.clone(), target.var_name.clone()))
-            .unwrap();
+    pub fn set_from_var(&mut self, target: &Address, var: &Var) -> Result<()> {
+        let target = self.get_var_mut(&(target.component.clone(), target.var_name.clone()))?;
         *target = var.clone();
+        Ok(())
     }
 
     pub fn remove_comp_vars(&mut self, comp_name: &CompName, comp_model: &model::Component) {

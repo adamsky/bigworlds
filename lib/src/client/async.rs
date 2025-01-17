@@ -24,7 +24,7 @@ pub trait AsyncClient {
     async fn step_request(&mut self, step_count: u32) -> Result<()>;
     async fn query(&mut self, q: Query) -> Result<QueryProduct>;
 
-    fn send_msg(&mut self, msg: Message) -> Result<()>;
+    fn send_msg(&mut self, msg: &Message) -> Result<()>;
     async fn recv_msg(&mut self) -> Result<Message>;
     fn try_recv_msg(&mut self) -> Result<Message>;
 }

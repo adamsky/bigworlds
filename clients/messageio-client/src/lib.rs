@@ -67,6 +67,7 @@ impl bigworlds::client::r#async::AsyncClient for Client {
                                 transports: vec![Transport::FramedTcp],
                             });
                             let req = serde_json::to_vec(&req).unwrap();
+                            // let req = bincode::serialize(&req).unwrap();
                             handler_c.network().send(_endpoint, &req);
                             debug!("sent registration request to server...");
                         } else {
@@ -187,8 +188,9 @@ impl bigworlds::client::r#async::AsyncClient for Client {
         Ok(())
     }
 
+    // TODO: provide a way to pass query object by reference
     async fn query(&mut self, q: Query) -> bigworlds::Result<QueryProduct> {
-        self.send_msg(Message::QueryRequest(q))?;
+        self.send_msg(&Message::QueryRequest(q))?;
         let resp = self
             .queue
             .recv()
@@ -201,10 +203,10 @@ impl bigworlds::client::r#async::AsyncClient for Client {
         }
     }
 
-    fn send_msg(&mut self, msg: Message) -> bigworlds::Result<()> {
+    fn send_msg(&mut self, msg: &Message) -> bigworlds::Result<()> {
         self.handler
             .network()
-            .send(self.endpoint, &msg.to_bytes(&Encoding::Bincode)?);
+            .send(self.endpoint, &msg.to_bytes(Encoding::Bincode)?);
         Ok(())
     }
 

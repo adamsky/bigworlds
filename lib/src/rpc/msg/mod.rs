@@ -24,7 +24,7 @@ use crate::net::Encoding;
 use crate::query::{Query, QueryProduct};
 use crate::{EntityId, EntityName, Float, Int, Result, Var};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     ErrorResponse(String),
 
@@ -158,12 +158,10 @@ impl Message {
         let msg = decode(&bytes, encoding)?;
         Ok(msg)
     }
-    //
+
     /// Serializes into bytes.
-    pub fn to_bytes(mut self, encoding: &Encoding) -> Result<Vec<u8>> {
-        Ok(bincode::serialize(&self).unwrap())
-        // unimplemented!()
-        // Ok(encode(self, encoding)?)
+    pub fn to_bytes(&self, encoding: Encoding) -> Result<Vec<u8>> {
+        Ok(crate::util_net::encode(&self, encoding)?)
     }
 
     //     /// Unpacks message payload into a payload struct of provided type.

@@ -60,6 +60,8 @@ pub enum Error {
 
     #[error("leader not connected: {0}")]
     LeaderNotConnected(String),
+    #[error("leader not selected: {0}")]
+    LeaderNotSelected(String),
     #[error("worker not registered: {0}")]
     WorkerNotRegistered(String),
     #[error("failed registering worker: {0}")]
@@ -133,7 +135,7 @@ pub enum Error {
     #[error("failed getting entity with name: {0}")]
     FailedGettingEntityByName(String),
     #[error("failed getting variable: {0}")]
-    FailedGettingVarFromSim(Address),
+    FailedGettingVar(Address),
     #[error(
     "failed getting variable from entity storage: comp: {}, var: {}",
     _0.0,

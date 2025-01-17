@@ -10,7 +10,7 @@ pub mod worker;
 
 #[cfg(feature = "machine")]
 pub mod machine;
-pub mod processor;
+pub mod behavior;
 
 pub mod compat;
 pub mod msg;
