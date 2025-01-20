@@ -34,6 +34,16 @@ pub struct Part {
 }
 
 impl Part {
+    pub fn new() -> Self {
+        Self {
+            entities: FnvHashMap::default(),
+            machines: FnvHashMap::default(),
+            behaviors: vec![],
+            behavior_broadcast: tokio::sync::broadcast::channel(20).0,
+            libs: vec![],
+        }
+    }
+
     /// Initializes the worker `Part` using the given model.
     pub fn from_model(
         model: &Model,

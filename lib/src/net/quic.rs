@@ -27,7 +27,13 @@ pub fn spawn(
             info!("connection incoming");
             let runtime = runtime.clone();
             runtime.clone().spawn(async move {
-                if let Err(e) = handle_connection(exec.clone(), conn, runtime.clone()).await {
+                if let Err(e) = handle_connection(
+                    exec.clone(),
+                    conn.await.expect("failed establishing connection"),
+                    runtime.clone(),
+                )
+                .await
+                {
                     error!("connection failed: {reason}", reason = e.to_string())
                 }
             });
@@ -37,14 +43,11 @@ pub fn spawn(
     Ok(())
 }
 
-async fn handle_connection(
+pub async fn handle_connection(
     exec: LocalExec<(super::ConnectionOrAddress, Vec<u8>), Vec<u8>>,
-    conn: quinn::Connecting,
+    mut connection: quinn::Connection,
     runtime: runtime::Handle,
 ) -> Result<()> {
-    let mut connection: quinn::Connection =
-        conn.await.map_err(|e| Error::NetworkError(e.to_string()))?;
-
     async {
         trace!("connection established");
 

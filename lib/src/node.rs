@@ -26,8 +26,7 @@ use crate::rpc::node::{Request, Response};
 use crate::time::Duration;
 use crate::util::Shutdown;
 use crate::util_net::{decode, encode};
-use crate::worker::{Config as WorkerConfig, WorkerHandle};
-use crate::{leader, net, rpc, server, worker, Error, Relay, Result, ServerConfig};
+use crate::{leader, net, rpc, server, worker, Error, Relay, Result};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,7 +75,7 @@ pub struct NodeHandle {
 }
 
 pub struct Node {
-    pub worker_handles: Vec<WorkerHandle>,
+    pub worker_handles: Vec<worker::Handle>,
 }
 
 /// Spawns a `Node` on the provided runtime.
@@ -172,7 +171,7 @@ fn handle_request(
         } => {
             let mut worker_handle = worker::spawn(
                 vec![],
-                WorkerConfig::default(),
+                worker::Config::default(),
                 runtime.clone(),
                 shutdown.clone(),
             )?;
@@ -186,7 +185,7 @@ fn handle_request(
 
             let server_handle = server::spawn(
                 listeners.clone(),
-                ServerConfig::default(),
+                server::Config::default(),
                 worker_handle.clone(),
                 runtime.clone(),
                 shutdown.clone(),

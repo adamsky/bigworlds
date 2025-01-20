@@ -7,16 +7,12 @@ use crate::error::{Error, Result};
 use crate::{model, string, CompName, StringId, Var, VarName, VarType};
 
 pub type StorageIndex = (CompName, VarName);
-// type TypedStorageIndex = (StorageIndex, VarType);
 
-/// Entity's main data storage structure.
+/// Entity's data storage structure.
+// TODO: benchmark performance of the alternative storage layouts
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-// #[derive(deepsize::DeepSizeOf)]
 pub struct Storage {
     pub map: FnvHashMap<StorageIndex, Var>,
-    // pub numbers: FnvHashMap<StorageIndex, Number>,
-    // TODO benchmark performance of the alternative storage layout
-    // _map: FnvHashMap<CompId, FnvHashMap<VarId, Var>>,
 }
 
 impl Storage {
@@ -61,7 +57,28 @@ impl Storage {
         Ok(())
     }
 
-    pub fn remove_comp_vars(&mut self, comp_name: &CompName, comp_model: &model::Component) {
+    /// Removes all component-associated vars based on given component name.
+    ///
+    /// NOTE: this operation is expensive as it needs to iterate over all
+    /// storage entries. This is due to how storage indexes it's entries with
+    /// a (comp_name, var_name) pair. If it's acceptable to use var names
+    /// defined for the component in the model, use [`remove_comp_vars_model`]
+    /// instead.
+    pub fn remove_comp_vars(&mut self, comp_name: &CompName) {
+        let mut to_remove = vec![];
+        for ((_comp_name, var_name), _) in &self.map {
+            if _comp_name == comp_name {
+                to_remove.push((_comp_name.clone(), var_name.clone()));
+            }
+        }
+        for r in to_remove {
+            self.map.remove(&r);
+        }
+    }
+
+    /// Removes all component-associated vars that are known to the model
+    /// based on the given component name.
+    pub fn remove_comp_vars_model(&mut self, comp_name: &CompName, comp_model: &model::Component) {
         for var_model in &comp_model.vars {
             self.map
                 .remove(&(comp_name.clone(), var_model.name.clone()));

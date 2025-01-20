@@ -102,8 +102,6 @@ impl TryFrom<intermediate::Model> for Model {
     type Error = Error;
 
     fn try_from(im: intermediate::Model) -> Result<Self> {
-        println!("intermediate model: {:?}", im);
-
         let mut model = Self::default();
 
         for im_scenario in im.scenarios {
@@ -123,6 +121,13 @@ impl TryFrom<intermediate::Model> for Model {
                 });
             }
             model.components.push(component);
+        }
+
+        for im_prefab in im.prefabs {
+            model.prefabs.push(PrefabModel {
+                name: im_prefab.name,
+                components: im_prefab.components,
+            });
         }
 
         for im_behavior in im.behaviors {

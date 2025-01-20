@@ -111,7 +111,6 @@ pub fn spawn_listener(
         // listen to incoming connections at the provided address
         let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         loop {
-            println!("accepting connections at: {:?}", address);
             // accept incoming connection as a stream
             let (mut stream, addr) = listener.accept().await.unwrap();
             // frame the stream into message chunks using the framed codec
@@ -125,11 +124,9 @@ pub fn spawn_listener(
                 write.send_all(&mut rcv_stream).await;
             });
 
-            // clones to satisfy compiler
             let exec_c = exec.clone();
             let mut shutdown_c = shutdown.clone();
             let runtime_cc = runtime_c.clone();
-
             runtime_c.spawn(async move {
                 loop {
                     let exec_cc = exec_c.clone();
@@ -154,7 +151,9 @@ pub fn spawn_listener(
                                 snd_c.send(resp_bytes).await;
                             });
                         }
-                        _ = shutdown_c.recv() => break,
+                        _ = shutdown_c.recv() => {
+                            break;
+                        }
                     }
                 }
             });

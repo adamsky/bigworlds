@@ -18,71 +18,41 @@ use libloading::Library;
 
 pub use storage::StorageIndex;
 
+/// Core building block of a simulation.
+///
+/// Each entity holds variables organized on the basis of attached components.
+///
+/// Entities are defined in a way that makes them easy to send between workers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
-    /// All data associated with the entity is stored here
+    /// All data associated with the entity.
     pub storage: Storage,
 
-    /// List of attached components
+    /// List of attached components.
+    ///
+    /// This list is updated automatically based on "schema-full" interactions
+    /// with the simulation.
+    ///
+    /// NOTE: It's possible to insert data into an entity bypassing this list,
+    /// this however has consequences for visibility in cases like querying
+    /// and attaching behaviors based on given entity's component makeup.
     pub components: Vec<CompName>,
-    // #[cfg(feature = "machine")]
-    // /// List of machine tasks
-    // pub machines: Vec<MachineHandle>,
 }
 
-// /// Basic building block of the simulation state.
-// #[derive(Debug, Clone, Serialize, Deserialize, deepsize::DeepSizeOf)]
-// pub struct Entity {
-//     /// All data associated with the entity is stored here
-//     pub storage: Storage,
-
-//     /// List of attached components
-//     pub components: Vec<CompName>,
-
-//     /// Current state of each component-tied state machine
-//     #[cfg(feature = "machine")]
-//     pub comp_state: FnvHashMap<CompName, StringId>,
-
-//     /// Queue of scheduled component-tied machines for each event
-//     #[cfg(feature = "machine")]
-//     pub comp_queue: FnvHashMap<EventName, Vec<CompName>>,
-
-//     // Non-serializable aspects of an entity
-//     // TODO use cfg_if to include this only if related features are enabled
-//     #[serde(skip)]
-//     pub insta: EntityNonSer,
-// }
-
 impl Entity {
-    /// Creates a new entity using the prefab model.
+    /// Creates a new entity using a prefab model.
     pub fn from_prefab(prefab: &PrefabModel, model: &Model) -> Result<Entity> {
-        trace!("creating new entity from prefab");
-
         let mut ent = Entity::empty();
-
-        #[cfg(feature = "machine")]
-        {
-            // ent.comp_queue
-            //     .insert(string::new_truncate(crate::DEFAULT_INIT_EVENT), Vec::new());
-
-            // for event in &model.events {
-            //     ent.comp_queue
-            //         .insert(string::new_truncate(&event.id), Vec::new());
-            // }
-        }
 
         for comp in &prefab.components {
             ent.attach(comp.clone(), model)?;
         }
-
-        // TODO setup dyn libs
 
         Ok(ent)
     }
 
     /// Creates a new entity from model.
     pub fn from_prefab_name(prefab: EntityName, sim_model: &model::Model) -> Result<Entity> {
-        trace!("creating entity from prefab name: {}", prefab);
         let ent_model = sim_model
             .get_prefab(&prefab)
             .ok_or(Error::NoEntityPrefab(prefab))?;
@@ -94,17 +64,18 @@ impl Entity {
         Entity {
             storage: Storage::default(),
             components: vec![],
-            // #[cfg(feature = "machine")]
-            // machines: vec![],
         }
     }
 
+    /// Attaches a component to the entity, based on the provided model.
     pub fn attach(&mut self, component: CompName, model: &Model) -> Result<()> {
         let comp_model = model.get_component(&component)?;
-        debug!("attaching component: {:?}", comp_model);
 
+        // Mark the entity as having the component attached
         self.components.push(component.clone());
 
+        // Initialize component data on the storage as seen in the model
+        // definition
         for var_model in &comp_model.vars {
             self.storage.insert(
                 (component.clone(), var_model.name.clone()),
@@ -115,66 +86,20 @@ impl Entity {
             );
         }
 
-        #[cfg(feature = "machine")]
-        {
-            // trace!("triggers: {:?}", comp_model.triggers);
-            // for trigger in &comp_model.triggers {
-            //     let t = string::new_truncate(trigger);
-            //     if let Some(q) = self.comp_queue.get_mut(&t) {
-            //         trace!("pushing to comp_queue: {}", comp_model.name);
-            //         q.push(comp_model.name.clone());
-            //     }
-            // }
-            // // println!("")
-            // self.comp_state.insert(
-            //     comp_model.name.clone(),
-            //     comp_model.logic.start_state.clone(),
-            // );
-        }
-
-        // debug!("start_state: {}", comp_model.start_state);
-
-        //// ignore components that don't have any states
-        //// (besides the built-in 'none' state)
-        //// TODO
-        // if comp_model.logic.states.len() >= 0 {
-        // let comp_uid = (IndexString::from(comp_name).unwrap(),);
-
-        #[cfg(feature = "machine")]
-        {
-            // if !self.comp_state.contains_key(&component) {
-            //     for trigger in &comp_model.triggers {
-            //         //                println!("trigger: {}", trigger);
-            //         let t = string::new_truncate(trigger);
-            //         #[cfg(feature = "machine")]
-            //         self.comp_queue.get_mut(&t).unwrap().push(component.clone());
-            //     }
-            // }
-        }
-
         Ok(())
     }
 
+    /// Detaches a component from the entity.
     pub fn detach(&mut self, comp_name: &CompName, sim_model: &Model) -> Result<()> {
+        // Mark the entity as not having the component attached anymore
         if let Ok(idx) = self.components.binary_search(comp_name) {
             self.components.remove(idx);
         }
-        self.storage
-            .remove_comp_vars(comp_name, sim_model.get_component(comp_name)?);
 
-        #[cfg(feature = "machine")]
-        {
-            // self.comp_state.remove(comp_name);
-            // // find and remove references to component from all the queues
-            // // for different events
-            // for (q, v) in &mut self.comp_queue {
-            //     let n = match v.iter().position(|c| c == comp_name) {
-            //         Some(p) => p,
-            //         None => continue,
-            //     };
-            //     v.remove(n);
-            // }
-        }
+        // Remove any data that is associated with the component
+        // TODO: consider using the model-constrained version of this function,
+        // maybe provide another variant of the `detach` function for that.
+        self.storage.remove_comp_vars(comp_name);
 
         Ok(())
     }

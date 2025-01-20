@@ -26,6 +26,8 @@ use crate::{EntityId, EntityName, Float, Int, Result, Var};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
+    Disconnect,
+
     ErrorResponse(String),
 
     PingRequest(Vec<u8>),
@@ -54,13 +56,11 @@ pub enum Message {
     TypedDataPullRequest(TypedDataPullRequest),
     TypedDataPullResponse(TypedDataPullResponse),
 
-    DataTransferRequest(DataTransferRequest),
-    DataTransferResponse(DataTransferResponse),
-    TypedDataTransferRequest(TypedDataTransferRequest),
-    TypedDataTransferResponse(TypedDataTransferResponse),
-
-    ScheduledDataTransferRequest(ScheduledDataTransferRequest),
-
+    // DataTransferRequest(DataTransferRequest),
+    // DataTransferResponse(DataTransferResponse),
+    // TypedDataTransferRequest(TypedDataTransferRequest),
+    // TypedDataTransferResponse(TypedDataTransferResponse),
+    // ScheduledDataTransferRequest(ScheduledDataTransferRequest),
     ExportSnapshotRequest(ExportSnapshotRequest),
     ExportSnapshotResponse(ExportSnapshotResponse),
 
@@ -73,6 +73,9 @@ pub enum Message {
     ListScenariosResponse(ListScenariosResponse),
     LoadScenarioRequest(LoadScenarioRequest),
     LoadScenarioResponse(LoadScenarioResponse),
+
+    InitializeRequest,
+    InitializeResponse,
 }
 
 // /// Enumeration of all available message types.

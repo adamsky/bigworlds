@@ -50,7 +50,7 @@ pub async fn handle_advance_request(
 
     // server.lock().await.blocked.0.send(false);
 
-    debug!("waiting for clock to change..");
+    trace!("waiting for clock to change..");
 
     while clock_watch.changed().await.is_ok() {
         let current_clock = clock_watch.borrow().clone();
@@ -81,6 +81,8 @@ pub async fn handle_advance_request(
             continue;
         }
     }
+
+    debug!("clock changed");
 
     Ok(Message::AdvanceResponse(AdvanceResponse {
         error: "".to_string(),

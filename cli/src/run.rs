@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Error, Result};
+use clap::builder::PossibleValue;
 use clap::ArgMatches;
 
 use bigworlds::rpc;
@@ -14,6 +15,62 @@ use notify::Watcher;
 
 use crate::interactive;
 use crate::util::format_elements_list;
+
+pub fn cmd() -> clap::Command {
+    use clap::{Arg, ArgAction, Command};
+
+    Command::new("run")
+        .about("Run simulation locally")
+        .display_order(20)
+        .long_about(
+            "Run simulation from scenario, snapshot or experiment.\n\
+    If there are no arguments supplied the program will look for a scenario,\n\
+    snapshot or experiment (in that order) in the current working directory.",
+        )
+        .arg(Arg::new("path").value_name("path"))
+        .arg(
+            Arg::new("scenario")
+                .long("scenario")
+                .short('s')
+                .num_args(0..)
+                .default_missing_value("__any")
+                .help("Starts new world using a scenario manifest file"),
+        )
+        .arg(
+            Arg::new("snapshot")
+                .long("snapshot")
+                .short('n')
+                .help("Starts new world using a snapshot file"),
+        )
+        .arg(
+            Arg::new("server")
+                .long("server")
+                .help("Expose a server, allowing for attaching clients and services")
+                .value_name("SERVER_ADDRESS")
+                .default_value("127.0.0.1:0"),
+        )
+        .arg(
+            Arg::new("interactive")
+                .action(ArgAction::SetTrue)
+                .long("interactive")
+                .short('i')
+                .default_value("true"),
+        )
+        .arg(
+            Arg::new("icfg")
+                .long("icfg")
+                .help("Specify path to interactive mode configuration file")
+                .value_name("path")
+                .default_value("./interactive.yaml"),
+        )
+        .arg(
+            Arg::new("watch")
+                .long("watch")
+                .help("Watch project directory for changes")
+                .value_name("on-change")
+                .value_parser([PossibleValue::new("restart"), PossibleValue::new("update")]),
+        )
+}
 
 /// Starts a new simulation run, using a model or a snapshot file.
 ///

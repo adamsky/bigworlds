@@ -37,7 +37,6 @@ use bigworlds::{rpc, Executor};
 use bigworlds::{sim, SimHandle};
 
 use bigworlds::rpc::msg::LoadScenarioRequest;
-use bigworlds::server::ServerHandle;
 use messageio_client::Client;
 
 use self::compl::MainCompleter;
@@ -145,26 +144,19 @@ pub async fn start(
                 interface.set_prompt(local::create_prompt(&sim, &config).await.as_str())?;
             }
             SimDriver::Remote(client) => {
-                client.send_msg(&Message::StatusRequest(StatusRequest {
-                    format: "".to_string(),
-                }))?;
-                if let Ok(msg) = client.try_recv_msg() {
-                    if let Message::StatusResponse(status) = msg {
-                        let clock = status.current_tick;
-                        let str = format!(
-                            "[{}] ",
-                            //TODO this should instead ask for a default clock variable
-                            // that's always available (right now it's using clock mod's var)
-                            clock,
-                        );
-                        interface.set_prompt(&str);
-                    }
-                }
+                let status = client.status().await?;
+                let clock = status.current_tick;
+                let str = format!(
+                    "[{}] ",
+                    //TODO this should instead ask for a default clock variable
+                    // that's always available (right now it's using clock mod's var)
+                    clock,
+                );
+                interface.set_prompt(&str);
                 // remote::create_prompt(client, &config)
                 //     .await
                 //     .unwrap()
-                //     .as_str(),
-                // )?
+                //     .as_str()
             }
         };
 
@@ -246,10 +238,9 @@ pub async fn start(
                                 .set_prompt(local::create_prompt(&sim, &config).await.as_str())?;
                         }
                         SimDriver::Remote(client) => {
-                            unimplemented!()
-                            // let msg = client.server_step_request(1)?;
-                            // interface.set_prompt(create_prompt(&mut driver,
-                            // &config)?.as_str())?;
+                            let msg = client.step_request(1).await?;
+                            interface
+                                .set_prompt(create_prompt(&mut driver, &config).await?.as_str())?;
                         }
                     }
 
@@ -387,58 +378,22 @@ pub async fn start(
                             }
                             // list variables
                             // TODO add option to not lookup entity names (faster)
-                            "ls" | "l" => match &driver {
-                                SimDriver::Local(sim) => {
-                                    let resp = sim
-                                        .server
-                                        .execute(Message::DataTransferRequest(
-                                            DataTransferRequest {
-                                                transfer_type: "Full".to_string(),
-                                                selection: vec![],
-                                            },
-                                        ))
-                                        .await?;
-                                    if let Err(ref e) = resp {
-                                        warn!("{}", e);
+                            "ls" | "l" => {
+                                let query = bigworlds::Query::default()
+                                    .description(bigworlds::query::Description::Addressed);
+                                let product = match driver {
+                                    SimDriver::Local(ref sim_handle) => {
+                                        sim_handle.query(query).await?
                                     }
-                                    if let Ok(Message::DataTransferResponse(resp)) = resp {
-                                        if let TransferResponseData::AddressedVar(data) = resp.data
-                                        {
-                                            for (addr, var) in data {
-                                                println!("{addr} = {var:?}");
-                                            }
-                                        }
+                                    SimDriver::Remote(ref mut client) => {
+                                        client.query(query).await?
                                     }
+                                };
 
-                                    // let vars = sim.get_vars(true)?;
-                                    // for (addr_str, var) in vars {
-                                    //     let s = format!("{}: {}", addr_str, var.to_string());
-                                    //     if s.contains(args) || args == "" {
-                                    //         println!("{}", s);
-                                    //     }
-                                    // }
+                                for (addr, var) in product.to_map()? {
+                                    println!("{addr} = {var:?}");
                                 }
-                                SimDriver::Remote(client) => {
-                                    unimplemented!()
-                                    // let data = client.get_vars()?;
-                                    // if let TransferResponseData::Var(data_pack) = data {
-                                    //     for ((ent_name, comp_name, var_name), var) in data_pack.vars
-                                    //     {
-                                    //         let s = format!(
-                                    //             "{}:{}:{}:{}: {}",
-                                    //             ent_name,
-                                    //             comp_name,
-                                    //             var.get_type(),
-                                    //             var_name,
-                                    //             var.to_string()
-                                    //         );
-                                    //         if s.contains(args) || args == "" {
-                                    //             println!("{}", s);
-                                    //         }
-                                    //     }
-                                    // }
-                                }
-                            },
+                            }
                             // spawn entity
                             "spawn" => {
                                 let split = args.split(" ").collect::<Vec<&str>>();
@@ -551,6 +506,22 @@ pub async fn start(
                                 //     },
                                 //     _ => unimplemented!(),
                                 // };
+                            }
+                            "init" => {
+                                // initialize the cluster with default model
+                                match driver {
+                                    SimDriver::Local(sim_handle) => todo!(),
+                                    SimDriver::Remote(ref mut client) => {
+                                        client.send_msg(&Message::InitializeRequest)?;
+                                        if let Message::InitializeResponse =
+                                            client.recv_msg().await?
+                                        {
+                                            println!("initialized succesfully");
+                                        } else {
+                                            error!("not initialize response");
+                                        }
+                                    }
+                                }
                             }
 
                             "help" => {
@@ -700,6 +671,12 @@ show_list               {show_list}
                                 }
                                 _ => (),
                             },
+                            "disco" => match &mut driver {
+                                SimDriver::Local(sim) => unimplemented!(),
+                                SimDriver::Remote(client) => {
+                                    client.send_msg(&Message::Disconnect)?
+                                }
+                            },
 
                             _ => println!("couldn't recognize input: {:?}", line),
                         }
@@ -776,9 +753,10 @@ show_list               {show_list}
             }
         }
         if let SimDriver::Remote(ref mut client) = driver {
-            // unimplemented!()
             println!("Disconnecting...");
-            client.disconnect();
+            client.send_msg(&Message::Disconnect)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            client.disconnect().await;
             // thread::sleep(Duration::from_millis(500));
         }
     }

@@ -3,9 +3,8 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::executor::LocalExec;
-use crate::leader::LeaderConfig;
 use crate::net::CompositeAddress;
-use crate::{rpc, Result};
+use crate::{leader, rpc, Result};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
@@ -18,7 +17,7 @@ pub enum Request {
     },
     SpawnLeader {
         listeners: Vec<CompositeAddress>,
-        config: LeaderConfig,
+        config: leader::Config,
     },
 }
 

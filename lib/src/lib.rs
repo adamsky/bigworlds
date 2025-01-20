@@ -11,9 +11,8 @@ extern crate log;
 
 pub use error::{Error, Result};
 pub use relay::Relay;
-pub use server::ServerConfig;
+pub use server::Config as ServerConfig;
 pub use sim::SimHandle;
-pub use worker::WorkerHandle;
 
 pub use address::Address;
 pub use executor::{Executor, LocalExec};

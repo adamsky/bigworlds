@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::executor::LocalExec;
 use crate::leader::{State, Worker, WorkerExec};
 use crate::worker::WorkerId;
-use crate::{Error, Executor, Model, Result};
+use crate::{rpc, Error, Executor, Model, Result};
 
 pub type ManagerExec = LocalExec<Request, Result<Response>>;
 
@@ -95,15 +95,7 @@ async fn handle_request(req: Request, mut leader: &mut State) -> Result<Response
             leader.workers.insert(worker.id, worker);
             Ok(Response::Empty)
         }
-        Request::WorkerCount => unimplemented!("worker count"),
-        Request::PullModel(model) => {
-            println!("leader: pulling model: {model:?}");
-            leader.model = Some(model);
-
-            // propagate model to workers
-
-            Ok(Response::Empty)
-        }
+        Request::WorkerCount => todo!(),
         Request::GetModel => {
             if let Some(model) = &leader.model {
                 Ok(Response::GetModel(model.clone()))
@@ -111,8 +103,35 @@ async fn handle_request(req: Request, mut leader: &mut State) -> Result<Response
                 Err(Error::LeaderNotInitialized(format!("model not available")))
             }
         }
+        Request::PullModel(model) => {
+            // TODO: pulling the model is initiated by workers, perform
+            // additional checks if they have permission to do this
+
+            // TODO: should propagating of the model to the workers happen
+            // on the manager level?
+
+            leader.model = Some(model.clone());
+
+            // propagate the model to workers
+            // TODO: make concurrent
+            for (worker_id, worker) in &leader.workers {
+                worker
+                    .execute(rpc::worker::Request::SetModel(model.clone()))
+                    .await?;
+            }
+
+            Ok(Response::Empty)
+        }
         Request::SetModel(model) => {
-            leader.model = Some(model);
+            leader.model = Some(model.clone());
+
+            // propagate the model to workers
+            // TODO: make concurrent
+            for (worker_id, worker) in &leader.workers {
+                worker
+                    .execute(rpc::worker::Request::SetModel(model.clone()))
+                    .await?;
+            }
             Ok(Response::Empty)
         }
     }
@@ -125,8 +144,8 @@ pub enum Request {
     GetWorkers,
     AddWorker(Worker),
     WorkerCount,
-    PullModel(Model),
     GetModel,
+    PullModel(Model),
     SetModel(Model),
 }
 

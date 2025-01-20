@@ -122,12 +122,20 @@ impl<IN: Send + Sync + serde::Serialize, OUT: Send + Sync + serde::de::Deseriali
     async fn execute(&self, msg: IN) -> Result<OUT> {
         #[cfg(feature = "quic_transport")]
         let out_bytes = {
-            let (mut send, recv) = self.connection.open_bi().await.unwrap();
+            let (mut send, recv) = self
+                .connection
+                .open_bi()
+                .await
+                .map_err(|e| Error::NetworkError(e.to_string()))?;
             trace!("got both ends of stream");
             let msg = bincode::serialize(&msg).map_err(|e| Error::Other(e.to_string()))?;
             trace!("serialized message");
-            send.write_all(&msg).await.unwrap();
-            send.finish().await.unwrap();
+            send.write_all(&msg)
+                .await
+                .map_err(|e| Error::NetworkError(e.to_string()));
+            send.finish()
+                .await
+                .map_err(|e| Error::NetworkError(e.to_string()));
             trace!("wrote all msg");
             let out_bytes = recv
                 .read_to_end(1000000)

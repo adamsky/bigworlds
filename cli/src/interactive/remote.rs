@@ -15,7 +15,6 @@ pub async fn process_step(client: &mut Client, config: &Config) -> anyhow::Resul
 /// Create the prompt string. It defaults to current clock tick integer number.
 /// It can display a custom prompt based on the passed configuration.
 pub async fn create_prompt(client: &mut Client, cfg: &Config) -> anyhow::Result<String> {
-    // println!("create prompt start");
     if &cfg.prompt_format == "" {
         return create_prompt_default(client).await;
     }

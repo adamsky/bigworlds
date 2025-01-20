@@ -12,6 +12,25 @@ It tries to solve the problem of dynamic yet efficient distribution of discrete
 simulation elements over many machines. 
 
 
+### Quick-start
+
+Use `bigworlds-cli` to run a model locally:
+
+```
+cargo run --release -- run examples/flock/model.toml
+```
+
+Networked cluster can be assembled from multiple worker processes:
+
+```
+# machine 1
+cargo run --release -- worker --leader
+
+# machine 2
+cargo run --release -- worker 
+```
+
+
 ### Goals
 
 Provide a batteries-included solution for creating large virtual worlds with

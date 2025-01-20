@@ -7,16 +7,12 @@ use uuid::Uuid;
 
 use crate::entity::Entity;
 use crate::executor::{Executor, LocalExec};
-use crate::leader::{LeaderConfig, LeaderHandle};
 use crate::rpc::msg::{AdvanceRequest, Message, RegisterClientRequest, RegisterClientResponse};
 use crate::rpc::worker::RequestLocal;
-use crate::server::ServerHandle;
 use crate::util::Shutdown;
-use crate::worker::Config as WorkerConfig;
 use crate::{behavior, string};
 use crate::{
-    leader, rpc, server, worker, Address, EntityId, EntityName, Error, Model, Result, ServerConfig,
-    Var, WorkerHandle,
+    leader, rpc, server, worker, Address, EntityId, EntityName, Error, Model, Result, Var,
 };
 
 #[cfg(feature = "machine")]
@@ -38,7 +34,11 @@ pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<Si
     // spawn leader task
     let mut leader_handle = leader::spawn(
         vec![],
-        LeaderConfig::default(),
+        leader::Config {
+            // TODO: don't do autostep before initializing the cluster
+            autostep: Some(std::time::Duration::from_micros(10)),
+            ..Default::default()
+        },
         runtime.clone(),
         shutdown.clone(),
     )?;
@@ -46,7 +46,7 @@ pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<Si
     // spawn worker task
     let worker_handle = worker::spawn(
         vec![],
-        WorkerConfig::default(),
+        worker::Config::default(),
         runtime.clone(),
         shutdown.clone(),
     )?;
@@ -64,14 +64,19 @@ pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<Si
             #[cfg(feature = "ws_transport")]
             "ws://127.0.0.1:9223".parse()?,
         ],
-        ServerConfig::default(),
+        server::Config::default(),
         worker_handle.clone(),
         runtime,
         shutdown,
     )?;
 
-    server_handle.connect_to_worker(&worker_handle).await?;
+    // attach the server to the worker
+    server_handle
+        .connect_to_worker(&worker_handle, true)
+        .await?;
 
+    // register as a new client connecting to the server
+    // TODO: hide this code within server handle implementation
     let resp = server_handle
         .execute(Message::RegisterClientRequest(RegisterClientRequest {
             name: "sim_handle".to_string(),
@@ -82,6 +87,7 @@ pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<Si
         }))
         .await??;
 
+    // save the returned client id for use when querying the server
     let client_id = if let Message::RegisterClientResponse(RegisterClientResponse {
         client_id,
         encoding,
@@ -93,7 +99,6 @@ pub async fn spawn_on(runtime: runtime::Handle, shutdown: Shutdown) -> Result<Si
     } else {
         unimplemented!()
     };
-
     server_handle.client_id = Some(client_id);
 
     let handle = SimHandle {
@@ -132,28 +137,27 @@ pub async fn spawn_from_path(
     runtime: runtime::Handle,
     shutdown: Shutdown,
 ) -> Result<SimHandle> {
+    // create the model from path
+    // TODO: move path handling business, perhaps to `Model::from_path`
     let current_path = std::env::current_dir().expect("failed getting current dir path");
     let path_buf = PathBuf::from(model_path);
     let path_to_model = current_path.join(path_buf);
+    let model = Model::from_files(&vfs::PhysicalFS::new(path_to_model), None)?;
 
     let runtime = tokio::runtime::Handle::current();
-
-    let model = Model::from_files(&vfs::PhysicalFS::new(path_to_model), None)?;
-    debug!("Model: {model:?}");
-
     spawn_from(model, scenario, runtime, shutdown).await
 }
 
-/// Handle to local simulation instance.
+/// Local simulation instance handle.
 pub struct SimHandle {
-    pub server: ServerHandle,
-    pub leader: LeaderHandle,
-    pub worker: WorkerHandle,
+    pub server: server::Handle,
+    pub leader: leader::Handle,
+    pub worker: worker::Handle,
 }
 
 impl SimHandle {
     /// Registers new machine for instancing based on requirements.
-    // TODO: provide machine instructions as argument?
+    // TODO: perhaps provide machine instructions as argument
     #[cfg(feature = "machine")]
     pub async fn register_machine(
         &mut self,
@@ -175,8 +179,8 @@ impl SimHandle {
 
     /// Spawns new behavior task based on the provided closure.
     ///
-    /// Takes in an optional collection of triggers. `None` means
-    /// a "continuous" behavior  without explicit external triggering.
+    /// TODO: take in an optional collection of triggers. `None` would mean
+    /// continuous behavior without explicit external triggering.
     pub async fn spawn_behavior(
         &mut self,
         f: impl FnOnce(
@@ -191,13 +195,11 @@ impl SimHandle {
         behavior::spawn_synced(f, self.worker.behavior_exec.clone(), runtime)
     }
 
-    /// Publishes an event accross the simulation.
+    /// Broadcasts an event accross the simulation.
     pub async fn invoke(&mut self, event: &str) -> Result<()> {
         self.worker
             .ctl
-            .execute(rpc::worker::RequestLocal::Request(
-                rpc::worker::Request::Trigger(string::new_truncate(event)),
-            ))
+            .execute(rpc::worker::Request::Trigger(string::new_truncate(event)).into())
             .await??;
         Ok(())
     }
@@ -207,21 +209,20 @@ impl SimHandle {
     /// # Optional nature of synchronization
     ///
     /// Stepping the simulation simply means emitting a simulation-wide `step`
-    /// event. It also increments an internal clock which can be used for
-    /// wider synchronization of different elements.
+    /// event and incrementing the internal clock.
     ///
     /// Synchronization is not required however. It's possible that none of the
-    /// `behavior`s, `server`s, etc. that are part of a particular system
-    /// will choose to observe and/or act upon `step` events.
+    /// `behavior`s, `server`s, etc. that are part of the current simulation
+    /// setup will choose to observe and/or act upon `step` events.
     ///
-    /// It's also possible that it will be a mixed bag, some parts of a system
-    /// can make use of synchronization and others can remain "real-time".
+    /// It's also possible that it will be a mixed bag, some parts of the
+    /// system can make use of synchronization and others can remain
+    /// "real-time".
     pub async fn step(&mut self) -> Result<()> {
         use crate::rpc::server::Request as ServerRequest;
 
-        let now = std::time::Instant::now();
+        // let now = std::time::Instant::now();
 
-        debug!("simhandle step");
         let resp = self
             .server
             .execute(Message::AdvanceRequest(AdvanceRequest {
@@ -229,9 +230,8 @@ impl SimHandle {
                 wait: true,
             }))
             .await??;
-        debug!("got response from server: {:?}", resp);
 
-        println!("stepped in {}ms", now.elapsed().as_millis());
+        // println!("stepped in {}ms", now.elapsed().as_millis());
 
         Ok(())
     }
@@ -263,8 +263,6 @@ impl SimHandle {
     pub async fn initialize(&self, scenario: Option<String>) -> Result<()> {
         use rpc::leader::{Request, Response};
 
-        println!(">>> sim: initializing! applying scenario: {scenario:?}");
-
         self.leader
             .ctl
             .execute(Request::Initialize { scenario }.into())
@@ -285,7 +283,7 @@ impl SimHandle {
         let resp = self
             .leader
             .ctl
-            .execute(rpc::leader::Request::SpawnEntity(name, prefab).into())
+            .execute(rpc::leader::Request::SpawnEntity { name, prefab }.into())
             .await??;
         match resp {
             rpc::leader::Response::Empty => Ok(()),
@@ -298,6 +296,15 @@ impl SimHandle {
             .worker
             .ctl
             .execute(rpc::worker::Request::GetModel.into())
+            .await??
+            .try_into()?)
+    }
+
+    pub async fn query(&self, query: crate::Query) -> Result<crate::QueryProduct> {
+        Ok(self
+            .worker
+            .ctl
+            .execute(rpc::worker::Request::Query(query).into())
             .await??
             .try_into()?)
     }

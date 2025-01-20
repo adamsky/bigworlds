@@ -1,4 +1,4 @@
-//! Introduces additional functions for creating `arrayvec::ArrayString`s.
+//! Introduces additional ways for creating `arrayvec::ArrayString`s.
 
 use arrayvec::{ArrayString, ArrayVec};
 
@@ -57,10 +57,3 @@ pub(crate) fn truncate_str(slice: &str, size: u8) -> &str {
         slice
     }
 }
-
-// #[cfg(any(feature = "small_stringid", feature = "tiny_stringid"))]
-// impl From<&str> for StringId {
-//     fn from(input: &str) -> StringId {
-//         input.into()
-//     }
-// }

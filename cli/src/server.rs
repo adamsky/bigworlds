@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use anyhow::{Error, Result};
+use bigworlds::server;
 use clap::ArgMatches;
 use tokio::runtime;
 
-use bigworlds::leader::LeaderConfig;
+use bigworlds::leader;
 use bigworlds::net::CompositeAddress;
 use bigworlds::util::Shutdown;
-use bigworlds::worker::{self, Config as WorkerConfig};
-use bigworlds::{leader, ServerConfig};
+use bigworlds::worker;
 
 pub fn cmd() -> clap::Command {
     use clap::{builder::PossibleValue, Arg, Command};
@@ -157,9 +157,9 @@ pub async fn start(
         info!("listening for new workers on: {}", &cluster_addr);
     }
 
-    let default = ServerConfig::default();
+    let default = server::Config::default();
     println!("default transports list: {:?}", default.transports);
-    let config = ServerConfig {
+    let config = server::Config {
         name: match matches.get_one::<String>("name") {
             Some(n) => n.to_string(),
             None => "bigworlds_server".to_string(),
@@ -232,7 +232,7 @@ pub async fn start(
     // spawn the cluster leader
     let mut leader = leader::spawn(
         vec![],
-        LeaderConfig::default(),
+        leader::Config::default(),
         runtime.clone(),
         shutdown.clone(),
     )?;
@@ -240,13 +240,12 @@ pub async fn start(
     // spawn the worker
     let mut worker = worker::spawn(
         vec![],
-        WorkerConfig::default(),
+        worker::Config::default(),
         runtime.clone(),
         shutdown.clone(),
     )?;
     // initiate local connection to the leader
     leader.connect_to_worker(&worker, true).await?;
-    println!("worker and leader pair initiated");
 
     // spawn server
     let mut server = bigworlds::server::spawn(
@@ -256,8 +255,7 @@ pub async fn start(
         runtime.clone(),
         shutdown.clone(),
     )?;
-    server.connect_to_worker(&worker).await?;
-    println!("server task spawned");
+    server.connect_to_worker(&worker, true).await?;
 
     // // We can use server handle to send messages to the server, just as we
     // // would over the network

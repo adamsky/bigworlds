@@ -92,7 +92,10 @@ pub enum Request {
 
     Trigger(EventName),
 
-    SpawnEntity(String, String),
+    SpawnEntity {
+        name: String,
+        prefab: String,
+    },
 }
 
 impl Into<RequestLocal> for Request {
@@ -118,9 +121,6 @@ pub enum Response {
 
     GetListeners(Vec<CompositeAddress>),
 
-    WorkerStatus {
-        uptime: usize,
-    },
     ClusterStatus {
         worker_count: usize,
     },
@@ -147,6 +147,7 @@ pub enum Response {
     StepUntil,
 
     Status {
+        uptime: usize,
         worker_count: u32,
     },
 
@@ -172,6 +173,17 @@ impl TryInto<Var> for Response {
     fn try_into(self) -> std::result::Result<Var, Self::Error> {
         match self {
             Response::GetVar(var) => Ok(var),
+            _ => Err(Error::UnexpectedResponse(self.to_string())),
+        }
+    }
+}
+
+impl TryInto<crate::QueryProduct> for Response {
+    type Error = Error;
+
+    fn try_into(self) -> std::result::Result<crate::QueryProduct, Self::Error> {
+        match self {
+            Response::Query(product) => Ok(product),
             _ => Err(Error::UnexpectedResponse(self.to_string())),
         }
     }

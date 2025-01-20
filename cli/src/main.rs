@@ -8,13 +8,16 @@ extern crate log;
 extern crate serde;
 
 mod cli;
-mod client;
 mod interactive;
 mod node;
 mod run;
-mod server;
 mod tracing;
 mod util;
+
+mod client;
+mod leader;
+mod server;
+mod worker;
 
 use colored::*;
 

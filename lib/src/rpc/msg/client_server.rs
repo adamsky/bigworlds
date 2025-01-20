@@ -45,17 +45,7 @@ pub struct StatusResponse {
     pub engine_version: String,
     pub uptime: u64,
     pub current_tick: usize,
-
-    pub scenario_name: String,
-    pub scenario_title: String,
-    pub scenario_desc: String,
-    pub scenario_desc_long: String,
-    pub scenario_author: String,
-    pub scenario_website: String,
-    pub scenario_version: String,
-    pub scenario_engine: String,
-    pub scenario_mods: Vec<String>,
-    pub scenario_settings: Vec<String>,
+    // pub model: Model,
 }
 
 /// Requests registration of the client who's sending the message.

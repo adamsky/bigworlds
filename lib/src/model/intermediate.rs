@@ -25,7 +25,7 @@ pub struct Model {
     pub components: Vec<Component>,
     // pub events: Vec<EventModel>,
     // pub scripts: Vec<String>,
-    // pub prefabs: Vec<PrefabModel>,
+    pub prefabs: Vec<Prefab>,
     // pub components: Vec<ComponentModel>,
     pub data: FnvHashMap<String, String>,
     // pub data_files: Vec<DataFileEntry>,
@@ -59,7 +59,7 @@ impl Model {
         loop {
             // pop another include
             if let Some(include) = to_include.pop() {
-                println!("including from path: {include}");
+                trace!("including from path: {include}");
 
                 // TODO: expand wildcard
                 // if include.contains("*") {
@@ -111,6 +111,7 @@ impl Model {
         self.scenarios.extend(other.scenarios);
         self.behaviors.extend(other.behaviors);
         self.components.extend(other.components);
+        self.prefabs.extend(other.prefabs);
         self.data.extend(other.data);
     }
 }
@@ -153,6 +154,13 @@ pub struct Dependency {
 pub struct Scenario {
     pub name: String,
     pub data: FnvHashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefab {
+    pub name: String,
+    pub components: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

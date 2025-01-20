@@ -238,13 +238,12 @@ async fn handle_request(req: Request, mut worker: &mut WorkerState) -> Result<Re
                 // TODO: perhaps do a ping request here to make sure we're
                 // holding an up-to-date handle? otherwise we trust it's
                 // managed properly elsewhere
-                println!("got leader locally");
                 Ok(Response::GetLeader(leader.clone()))
             } else {
                 // if there's no handle present locally, check with the known
                 // workers
-                println!("no leader locally, querying other workers");
-                // TODO: execute in parallel
+                warn!("no leader locally, querying other workers");
+
                 let mut set = JoinSet::new();
                 for (id, remote) in &worker.remote_workers {
                     let remote = remote.clone();
@@ -253,6 +252,7 @@ async fn handle_request(req: Request, mut worker: &mut WorkerState) -> Result<Re
                     set.spawn(async move { remote.execute(rpc::worker::Request::GetLeader).await });
                 }
                 let mut leader_addr = None;
+
                 // TODO: compare responses and confirm they have the same
                 // leader
                 while let Some(result) = set.join_next().await {
@@ -284,14 +284,14 @@ async fn handle_request(req: Request, mut worker: &mut WorkerState) -> Result<Re
                     Ok(Response::GetLeader(leader))
                 } else {
                     // TODO: elect new leader
-                    // panic!("leader not elected")
-                    Err(Error::LeaderNotSelected(format!("")))
+                    Err(Error::LeaderNotSelected(format!(
+                        "worker manager failed to fulfil a request to get leader"
+                    )))
                 }
             }
         }
         Request::SetLeader(leader) => {
             worker.leader = leader;
-            println!("worker leader is some? {}", worker.leader.is_some());
             Ok(Response::Empty)
         }
         Request::InsertServer(server_id, server) => {
@@ -301,11 +301,14 @@ async fn handle_request(req: Request, mut worker: &mut WorkerState) -> Result<Re
         Request::GetBlockedWatch => Ok(Response::GetBlockedWatch(worker.blocked_watch.1.clone())),
         Request::SetBlockedWatch(value) => {
             worker.blocked_watch.0.send(value);
+            // worker.blocked_watch.0.send_if_modified(|old| *old != value);
             Ok(Response::Empty)
         }
         Request::GetClockWatch => Ok(Response::GetClockWatch(worker.clock_watch.1.clone())),
         Request::SetClockWatch(value) => {
+            trace!("setting clock watch to {}", value);
             worker.clock_watch.0.send(value);
+            // worker.clock_watch.0.send_if_modified(|old| *old != value);
             Ok(Response::Empty)
         }
         Request::GetServers => Ok(Response::GetServers(worker.servers.clone())),
@@ -394,6 +397,7 @@ async fn handle_request(req: Request, mut worker: &mut WorkerState) -> Result<Re
             }
         }
         Request::SpawnEntity(name, prefab) => {
+            trace!("spawning entity: {}, {}", name, prefab);
             if let Some(model) = &worker.model {
                 if let Some(ref mut part) = worker.part {
                     use crate::entity::Entity;

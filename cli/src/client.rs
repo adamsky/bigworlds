@@ -14,6 +14,7 @@ use crate::interactive;
 
 pub fn cmd() -> clap::Command {
     use clap::{Arg, ArgAction, Command};
+
     Command::new("client")
         .about("Start an interactive client session")
         .long_about(

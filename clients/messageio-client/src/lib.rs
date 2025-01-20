@@ -61,7 +61,7 @@ impl bigworlds::client::r#async::AsyncClient for Client {
                         if _ok {
                             let req = Message::RegisterClientRequest(RegisterClientRequest {
                                 name: "tester".to_string(),
-                                is_blocking: false,
+                                is_blocking: config.is_blocking,
                                 auth_pair: None,
                                 encodings: vec![Encoding::Bincode],
                                 transports: vec![Transport::FramedTcp],
@@ -109,7 +109,7 @@ impl bigworlds::client::r#async::AsyncClient for Client {
             },
         )?;
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         let client = Self::Client {
             handler,
@@ -121,7 +121,6 @@ impl bigworlds::client::r#async::AsyncClient for Client {
     }
 
     async fn disconnect(&mut self) -> bigworlds::Result<()> {
-        // self.handler.signals().send(());
         self.handler.stop();
         Ok(())
     }

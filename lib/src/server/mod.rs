@@ -32,8 +32,8 @@ use crate::util::Shutdown;
 use crate::util_net::{decode, encode};
 use crate::worker::{WorkerExec, WorkerId};
 use crate::{
-    model, net, rpc, string, Address, EntityName, EventName, Model, Query, QueryProduct, Relay,
-    Result, StringId, VarType, WorkerHandle,
+    model, net, rpc, string, worker, Address, EntityName, EventName, Model, Query, QueryProduct,
+    Relay, Result, StringId, VarType,
 };
 
 mod pull;
@@ -130,7 +130,7 @@ impl Executor<rpc::worker::Request, rpc::worker::Response> for Worker {
 }
 
 /// Configuration settings for server.
-pub struct ServerConfig {
+pub struct Config {
     /// Name of the server
     pub name: String,
     /// Description of the server
@@ -160,9 +160,9 @@ pub struct ServerConfig {
     pub encodings: Vec<Encoding>,
 }
 
-impl Default for ServerConfig {
+impl Default for Config {
     fn default() -> Self {
-        ServerConfig {
+        Config {
             name: "".to_string(),
             description: "".to_string(),
             self_keepalive: None,
@@ -225,7 +225,7 @@ impl Default for ServerConfig {
 /// particular entry-point (server).
 pub struct Server {
     /// Server configuration
-    pub config: ServerConfig,
+    pub config: Config,
 
     /// Connection with an entry-point to the underlying simulation system
     pub worker: Option<Worker>,
@@ -248,7 +248,7 @@ pub struct Server {
 }
 
 #[derive(Clone)]
-pub struct ServerHandle {
+pub struct Handle {
     pub ctl: LocalExec<rpc::server::RequestLocal, Result<rpc::server::Response>>,
 
     pub client: LocalExec<(Option<ClientId>, rpc::msg::Message), Result<rpc::msg::Message>>,
@@ -261,7 +261,7 @@ pub struct ServerHandle {
 }
 
 #[async_trait::async_trait]
-impl Executor<Message, Result<Message>> for ServerHandle {
+impl Executor<Message, Result<Message>> for Handle {
     async fn execute(&self, msg: Message) -> Result<Result<Message>> {
         self.client
             .execute((self.client_id, msg))
@@ -270,11 +270,13 @@ impl Executor<Message, Result<Message>> for ServerHandle {
     }
 }
 
-impl ServerHandle {
-    /// Connects leader to worker. It also makes sure to connect worker
-    /// to leader. Local channel communications are more difficult and
-    /// we need to set things up both ways.
-    pub async fn connect_to_worker(&mut self, worker_handle: &WorkerHandle) -> Result<()> {
+impl Handle {
+    /// Connects server to worker.
+    pub async fn connect_to_worker(
+        &mut self,
+        worker_handle: &worker::Handle,
+        duplex: bool,
+    ) -> Result<()> {
         let mut _server_id = None;
 
         // connect server to worker
@@ -289,19 +291,8 @@ impl ServerHandle {
             _server_id = Some(server_id);
         }
 
-        // connect worker to server
-        let resp = worker_handle
-            .ctl
-            .execute(rpc::worker::RequestLocal::ConnectToServer(
-                _server_id,
-                self.worker.clone(),
-                worker_handle.server_exec.clone(),
-            ))
-            .await??;
-        if let rpc::worker::Response::ConnectToServer { worker_id } = resp {
-            self.worker_id = Some(worker_id);
-        } else {
-            panic!("bad response: {}", resp);
+        if duplex {
+            worker_handle.connect_to_local_server(&self).await?;
         }
 
         Ok(())
@@ -311,11 +302,11 @@ impl ServerHandle {
 /// Spawns a new server using provided address and config.
 pub fn spawn(
     listeners: Vec<CompositeAddress>,
-    config: ServerConfig,
-    mut worker_handle: WorkerHandle,
+    config: Config,
+    mut worker_handle: worker::Handle,
     runtime: runtime::Handle,
     mut shutdown: Shutdown,
-) -> Result<ServerHandle> {
+) -> Result<Handle> {
     let (local_ctl_executor, mut local_ctl_stream) = LocalExec::new(20);
     let (local_worker_executor, mut local_worker_stream) = LocalExec::new(20);
     let (local_client_executor, mut local_client_stream) = LocalExec::new(20);
@@ -360,10 +351,7 @@ pub fn spawn(
         let mut server_block = _server.lock().await.blocked.1.clone();
         let mut clock = _server.lock().await.clock.1.clone();
         loop {
-            // trace!("starting client block monitor loop");
-
             // Spawn a future for each client.
-            // let mut blocked_clients = FuturesUnordered::new();
             let mut blocked_clients = Vec::new();
 
             let mut clients = Vec::new();
@@ -371,41 +359,32 @@ pub fn spawn(
                 clients.push((client_id.clone(), client.blocked.1.clone()));
             }
 
-            // for (client_id, client) in &server.lock().await.clients {
             for (client_id, mut client) in clients.into_iter() {
                 if *client.borrow() == true {
                     debug!("client blocked, waiting for it to unblock");
                     let mut client = client.clone();
-                    blocked_clients
-                        // .push(async move { client.changed().map(|_| client_id.clone()) });
-                        .push(async move {
-                            loop {
-                                client.changed().await;
-                                if *client.borrow() == false {
-                                    debug!("client unblocked: {}", *client.borrow());
-                                    return;
-                                } else {
-                                    continue;
-                                }
+                    blocked_clients.push(async move {
+                        loop {
+                            client.changed().await;
+                            if *client.borrow() == false {
+                                debug!("client unblocked: {}", *client.borrow());
+                                return;
+                            } else {
+                                continue;
                             }
-                        });
+                        }
+                    });
                 }
             }
 
-            // while let Some(_) = blocked_clients.next().await {
-            //     println!("client now unblocked");
-            // }
-
             if blocked_clients.len() != 0 {
                 _server.lock().await.blocked.0.send(true);
+
+                join_all(blocked_clients).await;
+                _server.lock().await.blocked.0.send(false);
             }
 
-            join_all(blocked_clients).await;
-
-            // warn!("all clients unblocked");
-
             // at this point all clients should be unblocked
-            _server.lock().await.blocked.0.send(false);
 
             // // Wait until the next step.
             // clock.changed().await;
@@ -415,16 +394,17 @@ pub fn spawn(
         }
     });
 
-    // Spawn the blocking monitor task. It watches for changes to the global
-    // `blocked` watch and notifies the worker accordingly.
+    // Spawn the blocking monitor task.
     let _server = server.clone();
     runtime.spawn(async move {
+        // Each iteration watches for changes to the `blocked` watch and
+        // notifies the worker accordingly.
         let mut blocked_rcv = _server.lock().await.blocked.1.clone();
         let mut worker = _server.lock().await.worker.clone();
         loop {
-            trace!("server loop start");
             if let Ok(_) = blocked_rcv.changed().await {
                 let is_blocked = *blocked_rcv.borrow();
+                // println!("borrowed: is blocked: {is_blocked}");
                 if let Some(worker) = worker.as_ref() {
                     trace!(
                         "letting worker know server is not blocking: is_blocked: {}",
@@ -435,10 +415,9 @@ pub fn spawn(
                         .await
                     {
                         error!("{}", e);
-                        // panic!("{}", e);
                     }
                 } else {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     worker = if let Ok(s) = _server.try_lock() {
                         s.worker.clone()
                     } else {
@@ -449,7 +428,7 @@ pub fn spawn(
         }
     });
 
-    // Finally let's spawn the main handler task.
+    // Finally spawn the main handler task.
     let runtime_c = runtime.clone();
     runtime.spawn(async move {
         let runtime = runtime_c;
@@ -502,7 +481,7 @@ pub fn spawn(
         }
     });
 
-    Ok(ServerHandle {
+    Ok(Handle {
         ctl: local_ctl_executor,
         client: local_client_executor,
         // listeners,
@@ -517,7 +496,6 @@ async fn handle_local_ctl_request(
     mut server: Arc<Mutex<Server>>,
     runtime: runtime::Handle,
 ) -> Result<rpc::server::Response> {
-    println!(">> handling local ctl request on server");
     match req {
         rpc::server::RequestLocal::ConnectToWorker(server_worker, worker_server) => {
             let mut resp = server_worker
@@ -617,9 +595,7 @@ async fn handle_worker_request(
             unimplemented!();
         }
         rpc::server::Request::ClockChangedTo(clock) => {
-            // println!("clockchangedto: before lock");
             server.lock().await.clock.0.send(clock);
-            // println!("clockchangedto: was able to acquire lock on server");
             Ok(rpc::server::Response::Empty)
         }
         _ => unimplemented!(),
@@ -759,12 +735,21 @@ async fn handle_message(
     };
 
     match msg {
+        Message::Disconnect => {
+            let mut server = server.lock().await;
+            server.clients.remove(&client_id);
+            println!("disconnected client");
+            // TODO: don't just send `unblocked`, rather trigger re-check with
+            // all clients if they're currently blocking
+            server.blocked.0.send(false);
+            Ok(Message::Disconnect)
+        }
         Message::StatusRequest(req) => {
             // use server_worker::{Request, Response, RequestLocal};
             // server.worker.server_exec.execute(RequestLocal::Request(Request::))
 
             let mut _server = server.lock().await;
-            let clock = *_server.clock.1.borrow();
+            // let clock = *_server.clock.1.borrow();
 
             _server.handle_status_request(req, &client_id).await
         }
@@ -785,28 +770,6 @@ async fn handle_message(
         //     }
         //     .into())
         // }
-        Message::DataTransferRequest(req) => {
-            use crate::query::{Description, Layout, Trigger};
-            use rpc::worker::{Request, RequestLocal, Response};
-
-            let resp = if let Some(worker) = server.lock().await.worker.as_ref() {
-                worker
-                    .execute(
-                        Request::Query(Query::default().description(Description::Addressed)).into(),
-                    )
-                    .await?
-            } else {
-                unimplemented!();
-            };
-            if let Response::Query(product) = resp {
-                if let QueryProduct::AddressedVar(data) = product {
-                    return Ok(Message::DataTransferResponse(msg::DataTransferResponse {
-                        data: msg::TransferResponseData::AddressedVar(data),
-                    }));
-                }
-            }
-            return Err(Error::Unknown);
-        }
         Message::QueryRequest(q) => {
             if let Some(worker) = server.lock().await.worker.as_ref() {
                 let resp = worker.execute(rpc::worker::Request::Query(q)).await?;
@@ -841,10 +804,6 @@ async fn handle_message(
         Message::DataPullResponse(data_pull_response) => todo!(),
         Message::TypedDataPullRequest(typed_data_pull_request) => todo!(),
         Message::TypedDataPullResponse(typed_data_pull_response) => todo!(),
-        Message::DataTransferResponse(data_transfer_response) => todo!(),
-        Message::TypedDataTransferRequest(typed_data_transfer_request) => todo!(),
-        Message::TypedDataTransferResponse(typed_data_transfer_response) => todo!(),
-        Message::ScheduledDataTransferRequest(scheduled_data_transfer_request) => todo!(),
         Message::ExportSnapshotRequest(export_snapshot_request) => todo!(),
         Message::ExportSnapshotResponse(export_snapshot_response) => todo!(),
         Message::UploadProjectArchiveRequest(upload_project_request) => todo!(),
@@ -853,6 +812,8 @@ async fn handle_message(
         Message::ListScenariosResponse(list_scenarios_response) => todo!(),
         Message::LoadScenarioRequest(load_scenario_request) => todo!(),
         Message::LoadScenarioResponse(load_scenario_response) => todo!(),
+        Message::InitializeRequest => todo!(),
+        Message::InitializeResponse => todo!(),
     }
 }
 
@@ -1089,83 +1050,49 @@ impl Server {
         sr: msg::StatusRequest,
         client_id: &ClientId,
     ) -> Result<Message> {
-        unimplemented!()
+        use rpc::msg::client_server::StatusResponse;
+        use rpc::worker::{Request, Response};
 
-        // let connected_clients = self.clients.iter().map(|(id, c)| c.name.clone()).collect();
-        // let mut client = self.clients.get_mut(client_id).unwrap();
+        let connected_clients = self.clients.iter().map(|(id, c)| c.name.clone()).collect();
+        let mut client = self
+            .clients
+            .get_mut(client_id)
+            .ok_or(Error::Other("client not available".to_string()))?;
 
-        // if let Response::Scenario(model_scenario) = self
-        //     .worker
-        //     .as_ref()
-        //     .ok_or(Error::WorkerNotConnected("".to_string()))?
-        //     .execute(Request::Scenario)
-        //     .await?
-        // {
-        //     let resp = Message::StatusResponse(StatusResponse {
-        //         name: self.config.name.clone(),
-        //         description: self.config.description.clone(),
-        //         // address: self.greeters.first().unwrap().local_addr()?.to_string(),
-        //         connected_clients,
-        //         engine_version: crate::VERSION.to_owned(),
-        //         uptime: self.started_at.elapsed().as_secs(),
-        //         current_tick: match self
-        //             .worker
-        //             .as_ref()
-        //             .ok_or(Error::WorkerNotConnected("".to_string()))?
-        //             .execute(Request::Clock)
-        //             .await
-        //         {
-        //             Ok(Response::Clock(clock)) => clock,
-        //             Err(e) => return Err(e.into()),
-        //             _ => return Err(Error::Other("wrong response type".to_string())),
-        //         },
-        //         scenario_name: model_scenario.manifest.name.clone(),
-        //         scenario_title: model_scenario
-        //             .manifest
-        //             .title
-        //             .clone()
-        //             .unwrap_or("".to_string()),
-        //         scenario_desc: model_scenario
-        //             .manifest
-        //             .desc
-        //             .clone()
-        //             .unwrap_or("".to_string()),
-        //         scenario_desc_long: model_scenario
-        //             .manifest
-        //             .desc_long
-        //             .clone()
-        //             .unwrap_or("".to_string()),
-        //         scenario_author: model_scenario
-        //             .manifest
-        //             .author
-        //             .clone()
-        //             .unwrap_or("".to_string()),
-        //         scenario_website: model_scenario
-        //             .manifest
-        //             .website
-        //             .clone()
-        //             .unwrap_or("".to_string()),
-        //         scenario_version: model_scenario.manifest.version.clone(),
-        //         scenario_engine: model_scenario.manifest.engine.clone(),
-        //         scenario_mods: model_scenario
-        //             .manifest
-        //             .mods
-        //             .clone()
-        //             .iter()
-        //             .map(|smd| format!("{} ({})", smd.name, smd.version_req))
-        //             .collect(),
-        //         scenario_settings: model_scenario
-        //             .manifest
-        //             .settings
-        //             .clone()
-        //             .iter()
-        //             .map(|(k, v)| format!("{} = {:?}", k, v))
-        //             .collect(),
-        //     });
-        //     Ok(resp)
-        // } else {
-        //     unimplemented!()
-        // }
+        if let Response::Status {
+            uptime,
+            worker_count,
+        } = self
+            .worker
+            .as_ref()
+            .ok_or(Error::WorkerNotConnected("".to_string()))?
+            .execute(Request::Status)
+            .await?
+        {
+            let resp = Message::StatusResponse(StatusResponse {
+                name: self.config.name.clone(),
+                description: self.config.description.clone(),
+                // address: self.greeters.first().unwrap().local_addr()?.to_string(),
+                connected_clients,
+                engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                // TODO: explicitly say this is *server* uptime
+                uptime: self.started_at.elapsed().as_secs(),
+                current_tick: match self
+                    .worker
+                    .as_ref()
+                    .ok_or(Error::WorkerNotConnected("".to_string()))?
+                    .execute(Request::Clock)
+                    .await
+                {
+                    Ok(Response::Clock(clock)) => clock,
+                    Err(e) => return Err(e.into()),
+                    _ => return Err(Error::Other("wrong response type".to_string())),
+                },
+            });
+            Ok(resp)
+        } else {
+            unimplemented!()
+        }
     }
 
     // pub async fn handle_data_transfer_request(

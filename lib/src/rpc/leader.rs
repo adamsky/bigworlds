@@ -66,8 +66,11 @@ pub enum Request {
 
     ReadyUntil(usize),
 
-    /// Spawn entity based on the provided prefab
-    SpawnEntity(String, String),
+    /// Spawn entity based on the provided name prefab
+    SpawnEntity {
+        name: String,
+        prefab: String,
+    },
 
     /// Request simple echoing of sent bytes
     Ping(Vec<u8>),
